@@ -196,12 +196,12 @@ Then exactly four H2 sections, in this order:
    - Three outcomes. `xfail`: the marked command failed **and** its
      predicate holds (the documented bug reproduced). `xpass`: every command
      passed, so the correct behavior was observed; `map run` fails so the
-     marker gets removed. A pass after the family's Preconditions or a
-     `Requires:` recipe failed earlier in the run (`--keep-going`) is `fail`,
-     not `xpass`: its arrange never ran. `fail`: anything else, including a different
+     marker gets removed. `fail`: anything else, including a different
      failure at the marked command (a 401, 404 or 503 where the bug is a
-     500), an arrange step that breaks first, a timeout, or an early exit
-     without a confirmed assertion location.
+     500), an arrange step that breaks first, a timeout, an early exit
+     without a confirmed assertion location, or a pass after the family's
+     Preconditions or a `Requires:` recipe failed earlier in the run
+     (`--keep-going`), since its arrange never ran.
    - The predicate is `PATH OP [VALUE]` clauses joined by `&&`, matched like
      `--check` against the JSON object the last `control-agent-server` call
      on the marked line printed:
