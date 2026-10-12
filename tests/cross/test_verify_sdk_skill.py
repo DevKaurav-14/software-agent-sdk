@@ -161,6 +161,24 @@ def test_run_records_pass_fail_blocked_and_skips_model_blocks(
     ]
     assert {r["feature"] for r in ledger} == set(results)
 
+    # A feature proven by one bullet and blocked in another counts as proven.
+    family = demo_map / "S98-demo.md"
+    family.write_text(
+        FAMILY.replace(
+            "- **Model (`S98.model`).**", "- **Model (`S98.model`, `S98.ok`).**"
+        )
+    )
+    code, out = _run(capsys, "run", "--file", "S98", "--out", str(tmp_path / "two"))
+    rows = {
+        r["feature"]: r
+        for r in map(
+            json.loads, (tmp_path / "two/ledger.jsonl").read_text().splitlines()
+        )
+    }
+    assert rows["S98.ok"]["result"] == "pass"
+    assert "bullet 3: blocked" in rows["S98.ok"]["note"]
+    family.write_text(FAMILY)
+
     code, out = _run(capsys, "run", "--file", "S98", "--only", "S98.ok", "--dry-run")
     assert [r["ids"] for r in out["results"]] == [["S98.ok"]]
     code, out = _run(capsys, "run", "--file", "S98", "--only", "S98.nope")

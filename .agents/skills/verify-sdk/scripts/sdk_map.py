@@ -35,6 +35,7 @@ REPO_ROOT = SKILL_DIR.parents[2]
 FEATURE_MAP_DIR = SKILL_DIR / "references" / "feature-map"
 HOME_ENV = "SDK_VERIFY_HOME"
 RESULTS = ("pass", "fail", "blocked", "not-run")
+RESULT_PRECEDENCE = {"fail": 0, "pass": 1, "blocked": 2, "not-run": 3}
 SECTIONS = ["Sub-features", "How to get to it (agent POV)", "Driving it", "Gotchas"]
 FAMILY_FILE_RE = re.compile(r"^S\d{2}-[a-z0-9-]+\.md$")
 SUB_FEATURE_RE = re.compile(r"^- `(S\d{2}\.[a-z0-9-]+)`")
@@ -491,6 +492,7 @@ def cmd_run(args: argparse.Namespace) -> dict[str, Any]:
     out = None if args.dry_run else run_dir(args.out)
     revision = git("rev-parse", "HEAD") or "unknown"
     summary: list[dict[str, Any]] = []
+    per_feature: dict[str, list[dict[str, Any]]] = {}
     for path in files:
         for n, bullet in enumerate(bullets(path), 1):
             ids = [i for i in bullet["ids"] if not only or i in only]
@@ -546,20 +548,32 @@ def cmd_run(args: argparse.Namespace) -> dict[str, Any]:
                 "transcript": str(transcript) if transcript else None,
             }
             summary.append(entry)
-            if out is not None:
-                for feature in ids:
-                    append_row(
-                        out,
-                        {
-                            "feature": feature,
-                            "result": outcome,
-                            "entry": bullet["label"],
-                            "note": note,
-                            "revision": revision,
-                            "transcript": entry["transcript"],
-                            "at": datetime.now(UTC).isoformat(timespec="seconds"),
-                        },
-                    )
+            for feature in ids:
+                per_feature.setdefault(feature, []).append(
+                    entry | {"label": bullet["label"]}
+                )
+    if out is not None:
+        # One row per sub-feature: a feature several bullets prove fails if
+        # any of them failed, passes if one passed, and is blocked only when
+        # nothing that ran could prove it.
+        for feature, entries in per_feature.items():
+            worst = min(entries, key=lambda e: RESULT_PRECEDENCE[e["result"]])
+            append_row(
+                out,
+                {
+                    "feature": feature,
+                    "result": worst["result"],
+                    "entry": " | ".join(e["label"] for e in entries),
+                    "note": "; ".join(
+                        f"bullet {e['bullet']}: {e['result']}"
+                        + (f" ({e['note']})" if e["note"] else "")
+                        for e in entries
+                    ),
+                    "revision": revision,
+                    "transcript": worst["transcript"],
+                    "at": datetime.now(UTC).isoformat(timespec="seconds"),
+                },
+            )
     counts: dict[str, int] = {}
     for entry in summary:
         counts[entry["result"]] = counts.get(entry["result"], 0) + 1
