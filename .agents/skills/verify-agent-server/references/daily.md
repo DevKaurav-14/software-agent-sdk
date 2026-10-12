@@ -5,8 +5,10 @@ A daily pass cannot: 34 families and 900-odd sub-features take longer than one
 agent's day, and most of the map did not change since yesterday. The daily
 pass answers a narrower question with the same rigor: **did anything that
 merged since the last pass change what an API consumer sees, and does the rest
-still hold where it is cheapest to look?** It is the delta pass that
-[maintenance.md](maintenance.md) allows, and it moves the same baseline.
+still hold in its neighbourhood?** 
+
+It is the delta pass that [maintenance.md](maintenance.md) allows, and it
+moves the same baseline.
 
 This is a procedure, not a scheduler: run it from whatever runs you daily, do
 not create automations or post externally unless asked, and hand what you
