@@ -2936,6 +2936,41 @@ def cmd_state_cat(args: argparse.Namespace) -> dict[str, Any]:
     return result
 
 
+def cmd_assert(args: argparse.Namespace) -> dict[str, Any]:
+    """`--check` a value a recipe computed, so a `# bug:` predicate can name it."""
+    if not args.check:
+        usage_error(
+            "assert needs at least one --check",
+            example=f'{CLI} assert --value "$N" --check . eq 2',
+        )
+    if args.json is not None:
+        path = Path(args.json)
+        if not path.is_file():
+            usage_error(f"{args.json} does not exist")
+        raw = path.read_text(errors="replace")
+    elif args.value is not None:
+        raw = args.value
+    else:
+        raw = sys.stdin.read()
+    try:
+        value: Any = json.loads(raw)
+    except ValueError:
+        if args.json is not None:
+            usage_error(f"{args.json} is not JSON")
+        value = raw.rstrip("\n")
+    checks = [evaluate_check(value, spec) for spec in args.check]
+    result: dict[str, Any] = {
+        "ok": all(c["ok"] for c in checks),
+        "value": value,
+        "checks": checks,
+    }
+    if not result["ok"]:
+        result["hint"] = "failed check: " + "; ".join(
+            c["check"] for c in checks if not c["ok"]
+        )
+    return result
+
+
 def cmd_state_grep(args: argparse.Namespace) -> dict[str, Any]:
     run = resolve_run(args.run, require_alive=False)
     needle = os.environ.get(args.env_value, "") if args.env_value else args.text
@@ -3820,6 +3855,14 @@ def check_family(path: Path, routes: Sequence[dict[str, Any]] | None) -> list[st
                 "but its label does not say known bug"
             )
         for mark in bug_marks(bullet.script) if known_bug else []:
+            if NEGATIVE_BUG_RE.search(mark.command):
+                problems.append(
+                    f"line {bullet.line}: bullet '{bullet.label}': assert the "
+                    "correct behavior positively on the `# bug` line (an "
+                    "unrelated error in `if cmd; then false; fi`, `test !` or "
+                    "`! cmd` would read as fixed); use the verb's own expect "
+                    f"flag or `{CLI} assert`"
+                )
             try:
                 clauses = parse_bug_predicate(mark.predicate)
             except ValueError as exc:
@@ -4018,6 +4061,11 @@ class Bullet:
     line: int
     requires: list[str] = field(default_factory=list)
     needs: list[str] = field(default_factory=list)
+
+
+# Shapes that pass when the command breaks: `if cmd; then false; fi`, `! cmd`,
+# `test ! -e X`, or a check run only `if` something else holds.
+NEGATIVE_BUG_RE = re.compile(r"(?:^|[;&|(]\s*)(?:if|!)\s|\btest\s+!|\[\s+!\s")
 
 
 @dataclass
@@ -5894,6 +5942,26 @@ as blocked while the rest of the family runs.""",
   {CLI} config""",
         cmd_config,
     )
+
+    p = sub(
+        commands,
+        "assert",
+        "Check a value a recipe computed (a variable, a JSON file, stdin).",
+        f"""\
+  {CLI} assert --value "$SLOWEST" --check . le 1500
+  {CLI} assert --json "$F/alias-delete.json" --check status eq 409
+  some-program | {CLI} assert --check items len-eq 2
+
+Prints the value (parsed as JSON when it is JSON) and the --check results like
+`api --check`, and exits 1 when a check fails. Use it instead of `test` or
+`jq -e` on a `# bug` line, so the marker can name the value the bug produces:
+`# bug: value eq 404`.""",
+        cmd_assert,
+    )
+    source = p.add_mutually_exclusive_group()
+    source.add_argument("--value", help="the value itself (JSON or text)")
+    source.add_argument("--json", metavar="FILE", help="a JSON file")
+    p.add_argument("--check", action="append", nargs="+", metavar="FIELD OP [VALUE]")
 
     p = sub(
         commands,

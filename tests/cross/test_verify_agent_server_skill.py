@@ -9,6 +9,7 @@ launching an agent server.
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import signal
 import subprocess
@@ -825,6 +826,43 @@ def test_map_check_rejects_a_missing_or_malformed_bug_predicate(
     code, out = _run(capsys, "map", "check", "--file", "F98", "--no-routes")
     assert code == 1, out
     assert problem in out
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'if test "$VALUE" = carried; then false; fi  # bug: exit 1',
+        '! test "$VALUE" = carried  # bug: exit 1',
+        'test ! -e "$VALUE"  # bug: exit 1',
+    ],
+)
+def test_map_check_rejects_negative_bug_lines(write_verification_family, capsys, line):
+    write_verification_family(
+        cas, FAMILY.replace('test "$VALUE" = fixed  # bug: exit 1', line)
+    )
+    code, out = _run(capsys, "map", "check", "--file", "F98", "--no-routes")
+    assert code == 1, out
+    assert "positively" in out
+
+
+def test_assert_names_a_computed_value(tmp_path, capsys, monkeypatch):
+    code, out = _run(capsys, "assert", "--value", "1700", "--check", ".", "le", "1500")
+    result = json.loads(out)
+    assert code == 1
+    assert result["value"] == 1700
+    assert cas.bug_predicate_matches(
+        cas.parse_bug_predicate("value gt 1500"), 1, result
+    )
+    saved = tmp_path / "saved.json"
+    saved.write_text('{"status": 500}')
+    code, out = _run(
+        capsys, "assert", "--json", str(saved), "--check", "status", "eq", "409"
+    )
+    assert code == 1
+    assert json.loads(out)["checks"][0]["actual"] == "500"
+    monkeypatch.setattr("sys.stdin", io.StringIO("qa-text\n"))
+    code, out = _run(capsys, "assert", "--check", ".", "eq", "qa-text")
+    assert code == 0, out
 
 
 BUG_API = "control-agent-server api GET {path} --expect 200"

@@ -440,7 +440,9 @@ Preconditions:
   ODD=$(control-agent-server conversation start --no-run --tools none --no-autotitle --workspace "$F/qa f16&x=1#frag" --print-id)
   OWS=$(control-agent-server api GET "/api/conversations/$ODD" --field workspace.working_dir)
   control-agent-server api GET "/api/conversations/$ODD/vscode/url" --expect 200 --save F16.vscode-folder-encoding/odd-folder
-  control-agent-server api GET "/api/conversations/$ODD/vscode/url" --expect 200 --field url | python3 -c "$ROUNDTRIP" "$OWS"  # bug: exit 1
+  control-agent-server api GET "/api/conversations/$ODD/vscode/url" --expect 200 --field url \
+    | python3 -c 'import sys, json, urllib.parse as u; p = u.urlsplit(sys.stdin.read().strip()); print(json.dumps({"folder": u.parse_qs(p.query).get("folder"), "fragment": p.fragment}))' \
+    | control-agent-server assert --check folder len-eq 1 --check folder.0 eq "$OWS" --check fragment eq ''  # bug: value.fragment eq frag && value.folder.0 matches '/qa f16$'
   ```
   The normal workspace round-trips. For the odd one the `folder` parameter
   should decode back to `.../qa f16&x=1#frag`; today the value is pasted

@@ -301,7 +301,7 @@ Preconditions:
     --check resolved_ref eq "$H1" --save F26.install-repo-root-name/install --field name)
   control-agent-server api DELETE "/api/plugins/installed/$N" --expect 200
   control-agent-server api GET "/api/plugins/installed/$N" --expect 404
-  test "$N" = qa-f26-src  # bug: exit 1
+  control-agent-server assert --value "$N" --check . eq qa-f26-src  # bug: value matches '^qa-f26-src-[0-9a-f]{16}$'
   ```
   A manifest-less directory takes its directory's name, so the repository
   should install as `qa-f26-src`. Today it installs as

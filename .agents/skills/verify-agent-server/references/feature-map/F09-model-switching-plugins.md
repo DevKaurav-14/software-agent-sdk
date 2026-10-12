@@ -603,7 +603,7 @@ Preconditions:
   ```sh
   grep -n 'async switchAcpModel(' clients/typescript/src/client/conversation-client.ts
   grep -n 'async switchAcpModel(' clients/typescript/src/conversation/remote-conversation.ts
-  if grep -n 'returns 409 before the first message' clients/typescript/src/client/conversation-client.ts clients/typescript/src/conversation/remote-conversation.ts; then false; fi  # bug: exit 1
+  control-agent-server assert --value "$(cat clients/typescript/src/client/conversation-client.ts clients/typescript/src/conversation/remote-conversation.ts | grep -c 'returns 409 before the first message')" --check . eq 0  # bug: value ge 1
   ```
   Expected: the docstrings of `ConversationClient.switchAcpModel` and
   `RemoteConversation.switchAcpModel` say what `F09.acp-model-deferred` and

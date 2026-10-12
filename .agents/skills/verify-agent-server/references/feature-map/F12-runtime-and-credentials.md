@@ -357,8 +357,10 @@ control-agent-server api GET "/api/conversations/$R" --check execution_status eq
   OLD=$(control-agent-server ws stop f12-before --wait 5 --save F12.sandbox-pause-websocket/old-socket)
   OLD_SESSION=$(control-agent-server ws stop f12-before-session --wait 5 --save F12.sandbox-pause-websocket/old-session-socket)
   printf '%s\n%s\n' "$OLD" "$OLD_SESSION" | jq -c '{close, kinds}'
-  echo "$OLD" | jq -e '.close != null or ((.kinds.MessageEvent // 0) >= 1)'  # bug: exit 1
-  echo "$OLD_SESSION" | jq -e '.close != null or ((.kinds["durable:MessageEvent"] // 0) >= 1)'  # bug: exit 1
+  echo "$OLD" | jq -c '{opened, close, messages: (.kinds.MessageEvent // 0)} | .closed_or_streaming = (.close != null or .messages >= 1)' \
+    | control-agent-server assert --check closed_or_streaming eq true  # bug: value.opened eq true && value.close missing && value.messages eq 0
+  echo "$OLD_SESSION" | jq -c '{opened, close, messages: (.kinds["durable:MessageEvent"] // 0)} | .closed_or_streaming = (.close != null or .messages >= 1)' \
+    | control-agent-server assert --check closed_or_streaming eq true  # bug: value.opened eq true && value.close missing && value.messages eq 0
   ```
   Correct behavior: a socket that was open before the pause is closed by
   the server (so the client reconnects) or keeps streaming. Today both stay

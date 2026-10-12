@@ -5,7 +5,7 @@ description: >
   WebSocket API like an agent would", "drive the agent-server", "check an API
   change against a real server", "create or update the agent-server feature
   map", or "run the weekly API audit". Ships control-agent-server (launch,
-  doctor, api, ws, llm, conversations, fixtures, exec, evidence, map) and the
+  doctor, api, ws, llm, conversations, fixtures, exec, assert, evidence, map) and the
   maintained map of every agent-facing feature.
 triggers:
 - /verify-agent-server

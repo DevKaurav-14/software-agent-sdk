@@ -419,7 +419,7 @@ Preconditions:
   control-agent-server api DELETE "/api/conversations/$QA_DEL" --expect 200 --save F06.ws-delete-close/delete
   control-agent-server api GET "/api/conversations/$QA_DEL" --expect 404
   control-agent-server ws listen "/sockets/events/$QA_DEL" --expect-close 4004 --duration 5
-  if control-agent-server ws stop f06-del --expect-open --save F06.ws-delete-close/socket; then false; fi  # bug: opened eq true && close missing
+  control-agent-server ws stop f06-del --save F06.ws-delete-close/socket | control-agent-server assert --check close.code exists  # bug: value.opened eq true && value.stopped eq stopped && value.close missing
   ```
   Correct behavior: the server closes the open socket (with any close code)
   while it deletes the conversation; `EventService.close()` awaits
@@ -555,11 +555,14 @@ Preconditions:
   FROM_OBS=$(control-agent-server api GET "/api/conversations/$LIVE/events/search" --field items \
     | jq -e --arg id "$OBS_ID" '[.[].id] | length - index($id)')
   test "$FROM_OBS" -ge 2
-  control-agent-server api GET "/api/conversations/$LIVE/events/count" --query timestamp__gte="$OBS_T" \
-    --check . ge "$FROM_OBS" --save F06.search-timestamp-order/count-since-observation  # bug: status eq 200 && response.body ge 1
-  control-agent-server ws listen "/sockets/events/$LIVE" --query resend_mode=since --query after_timestamp="$OBS_T" \
-    --duration 3 --save F06.search-timestamp-order/replay-since-observation | jq -e --argjson n "$FROM_OBS" '.frames - 1 >= $n'  # bug: exit 1
-  control-agent-server api GET "/api/conversations/$LIVE/events/search" --field items | jq -e '[.[].timestamp] | . == sort'  # bug: exit 1
+  COUNT_SINCE=$(control-agent-server api GET "/api/conversations/$LIVE/events/count" --query timestamp__gte="$OBS_T" \
+    --save F06.search-timestamp-order/count-since-observation --field .)
+  control-agent-server assert --value="$((COUNT_SINCE - FROM_OBS))" --check . ge 0  # bug: value eq -1
+  SINCE=$(control-agent-server ws listen "/sockets/events/$LIVE" --query resend_mode=since --query after_timestamp="$OBS_T" \
+    --duration 3 --save F06.search-timestamp-order/replay-since-observation | jq .frames)
+  control-agent-server assert --value="$((SINCE - 1 - FROM_OBS))" --check . ge 0  # bug: value eq -1
+  control-agent-server api GET "/api/conversations/$LIVE/events/search" --field items \
+    | jq -c '[range(1; length) as $i | select(.[$i].timestamp < .[$i - 1].timestamp) | (.[$i].key // .[$i].kind)]' | control-agent-server assert --check . len-eq 0  # bug: value contains stats
   ```
   Correct behavior: a cut at the first `ObservationEvent` keeps it and
   everything listed after it (`FROM_OBS` events), over REST and over the

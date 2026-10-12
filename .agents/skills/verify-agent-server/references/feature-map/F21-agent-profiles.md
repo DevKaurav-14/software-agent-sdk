@@ -894,7 +894,9 @@ printf -- '---\nname: qa-f21-skill\ndescription: QA F21 user skill\n---\nQA_F21_
     --json '{"profile": {"llm_profile_ref": "qa-f21-missing", "tools": [], "mcp_server_refs": []}}' \
     --check valid eq false --check llm_profile_ref eq qa-f21-missing --check llm_profile_resolved eq false \
     --check errors contains "LLM profile 'qa-f21-missing' not found" --save F21.dangling-llm-report/materialize
-  if grep -q dangling_llm_profile_ref "$SEEDSRC"; then jq -e '.dangling_llm_profile_ref == "qa-f21-missing"' "$RAW" >/dev/null; fi  # bug: exit 1
+  PROMISED=$(grep -c dangling_llm_profile_ref "$SEEDSRC" || true)
+  jq -c --argjson promised "${PROMISED:-0}" '{promised: ($promised > 0), reported: .dangling_llm_profile_ref} | .agree = ((.promised | not) or .reported == "qa-f21-missing")' "$RAW" \
+    | control-agent-server assert --check agree eq true  # bug: value.promised eq true && value.reported missing
   ```
   Correct behavior: the two agree, either because materialize names the
   dangling reference in `dangling_llm_profile_ref` (as it names dangling
@@ -939,7 +941,7 @@ printf -- '---\nname: qa-f21-skill\ndescription: QA F21 user skill\n---\nQA_F21_
     "export const diagnostics: Shape<AgentProfileDiagnostics> = $DIAG;" > "$D/exported.ts"
   TSC="clients/typescript/node_modules/.bin/tsc --noEmit --strict --skipLibCheck --target es2020 --module esnext --moduleResolution bundler"
   $TSC "$D/contract.ts"
-  $TSC "$D/exported.ts"  # bug: exit 2
+  $TSC "$D/exported.ts" | control-agent-server assert --check . not-contains 'error TS'  # bug: value matches 'TS2353.*disabled_skills.*Shape<OpenHandsAgentProfile>' && value matches 'TS2353.*acp_startup_timeout.*Shape<ACPAgentProfile>' && value matches 'TS2353.*resolved_mcp_config_keys.*Shape<AgentProfileDiagnostics>'
   ```
   Expected: both files type-check, so a TypeScript consumer (Agent
   Canvas's profile editor) can read every field the server sends under its

@@ -807,7 +807,7 @@ Preconditions:
   done
   control-agent-server logs --run "$EV" --grep 'Evicted idle' --expect-min 1
   sleep 3
-  pgrep -f "$EV_MARK"  # bug: exit 1
+  control-agent-server assert --value "$(pgrep -fc "$EV_MARK")" --check . ge 1  # bug: value eq 0
   control-agent-server api POST "/api/conversations/$EV_CID/bash/bash_commands/$EV_CMD/stop" --run "$EV" --expect 200
   control-agent-server api GET "/api/conversations/$EV_CID/bash/bash_events/search" --run "$EV" \
     --query command_id__eq="$EV_CMD" --until-ok 15 --check items.-1.exit_code eq -15

@@ -253,8 +253,8 @@ Preconditions:
   control-agent-server exec --expect-output TS_UPLOAD_OK --save F14.upload-size/ts -- node "$F/ts_size.mjs" "$F"
   control-agent-server api POST /api/file/upload --query path="$F/size/rest.bin" --file file="$F/blob.bin" --expect 200 \
     --check success eq true --save F14.upload-size/rest
-  test "$(cat "$F/sdk-size.txt")" = 70000  # bug: exit 1
-  test "$(cat "$F/ts-size.txt")" = 70000  # bug: exit 1
+  control-agent-server assert --value "$(cat "$F/sdk-size.txt")" --check . eq 70000  # bug: value eq None
+  control-agent-server assert --value "$(cat "$F/ts-size.txt")" --check . eq 70000  # bug: value eq undefined
   ```
   Expected: both remote workspaces report `file_size` 70000, as
   `LocalWorkspace` does. Actual: every upload lands intact, but the server
@@ -283,7 +283,7 @@ Preconditions:
     --expect 5xx --check exception contains 'File too large' --save F14.upload-atomic/failed-overwrite
   prlimit --pid "$B2_PID" --fsize=unlimited:
   control-agent-server doctor --run "$B2"
-  cmp "$F/v2.txt" "$AT/target.txt"  # bug: exit 1
+  control-agent-server assert --value "{\"same\": $(cmp -s "$F/v2.txt" "$AT/target.txt" && echo true || echo false), \"size\": $(wc -c < "$AT/target.txt")}" --check same eq true  # bug: value.same eq false && value.size eq 500000
   ```
   Without the limit the 900 kB blob uploads intact (so the size alone is not
   the problem) and the small file is in place. Under the limit the overwrite
@@ -593,7 +593,8 @@ Preconditions:
     --raw-out "$F/doc-parent.tgz" --save F14.archive-format-doc/tar
   tar tzf "$F/doc-parent.tgz" > "$F/doc-parent.list"
   grep -q 'proj/notes.txt$' "$F/doc-parent.list"
-  if printf '%s\n' "$DOC_FORMAT" | grep -q 'entire directory' && test -z "$(grep 'top.txt' "$F/doc-parent.list")"; then false; fi  # bug: exit 1
+  jq -n --arg doc "$DOC_FORMAT" --rawfile list "$F/doc-parent.list" '{doc_entire_directory: ($doc | contains("entire directory")), tar_has_top: ($list | contains("top.txt"))} | .agree = (.tar_has_top or (.doc_entire_directory | not))' \
+    | control-agent-server assert --check agree eq true  # bug: value.doc_entire_directory eq true && value.tar_has_top eq false
   ```
   Expected: the description and the archive agree, either by documenting
   that a directory holding exactly one repository archives only that
@@ -674,7 +675,8 @@ Preconditions:
   SH
   control-agent-server exec --env CID="$CID" --env CC="$CC" --save F14.trajectory-concurrent/burst -- sh "$CC/burst.sh"
   test -s "$CC/1-6.status"
-  for s in "$CC"/[1-5]-[1-6].status; do test "$(cat "$s")" = 200; test -s "${s%.status}.zip"; python3 -m zipfile -t "${s%.status}.zip" > /dev/null; done  # bug: exit 1
+  BROKEN=$(for s in "$CC"/[1-5]-[1-6].status; do n=$(basename "$s" .status); z="${s%.status}.zip"; c=$(cat "$s"); if [ "$c" != 200 ]; then echo "$n:$c"; elif ! test -s "$z"; then echo "$n:200-empty"; elif ! python3 -m zipfile -t "$z" > /dev/null 2>&1; then echo "$n:200-badzip"; fi; done)
+  control-agent-server assert --value="$BROKEN" --check . eq ''  # bug: value matches ':(500|200-empty|200-badzip)'
   ```
   A single download is a valid zip. Expected: every concurrent download is
   200 with a valid zip, in all five rounds. Actual: every handler writes the

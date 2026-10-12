@@ -1020,7 +1020,7 @@ Preconditions:
   control-agent-server restart --hard
   control-agent-server api GET /api/canvas-extensions/installed/qa-orphan/backend --check state eq stopped \
     --check pid eq null --save F28.hard-restart-orphan/status-after-crash
-  if pgrep -f "$BK/artifacts/qa-orphan/"; then false; fi  # bug: exit 1
+  control-agent-server assert --value "$(pgrep -f "$BK/artifacts/qa-orphan/" || true)" --check . eq ''  # bug: value matches '^[0-9]+'
   ```
   Expected: no backend process of the dead server remains once the server is
   back (reaped at startup, or tied to the server's lifetime). Actual: the

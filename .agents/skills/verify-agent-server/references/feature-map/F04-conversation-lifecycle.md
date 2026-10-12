@@ -293,12 +293,11 @@ EOF
     --json "{\"workspace\": {\"working_dir\": \"$W\"}, \"agent\": $STUB_AGENT, \"autotitle\": false, \"initial_message\": {\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"QA F04 run false.\"}], \"run\": false}}" \
     --expect 201 --save F04.create-initial-message-run-false/start --field id)
   control-agent-server conversation events "$NR" --kinds MessageEvent --contains 'QA F04 run false.' --expect-count 1
-  if control-agent-server conversation wait "$NR" --until running,finished,error,stuck --timeout 15; then false; fi  # bug: status matches '^(running|finished)$'
-  control-agent-server api GET "/api/conversations/$NR" --check execution_status eq idle --save F04.create-initial-message-run-false/get
+  sleep 15; control-agent-server api GET "/api/conversations/$NR" --check execution_status eq idle --save F04.create-initial-message-run-false/get  # bug: response.body.execution_status matches '^(running|finished)$'
   control-agent-server conversation events "$NR" --kinds ActionEvent --expect-count 0
   ```
   Expected: the message is recorded and the conversation stays `idle` until
-  a `run` (no agent action). Today the wait sees `finished` within a second:
+  a `run` (no agent action). Today it is `finished` within a second:
   `start_conversation` sends the initial message with `run=False` and then
   always calls `event_service.run()`, never reading `initial_message.run`
   (whose default is `false`). The fix may instead remove the field from the

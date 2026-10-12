@@ -336,7 +336,7 @@ control-agent-server api GET /api/conversations/count --query status=idle --chec
   test "$AFTER" -ge 3
   control-agent-server api GET "/api/conversations/$E" --check execution_status eq error --quiet --save F05.run-error-responsive/after
   echo "slowest probe while the run failed: $SLOWEST ms"
-  test "$SLOWEST" -le 1500  # bug: exit 1
+  control-agent-server assert --value "$SLOWEST" --check . le 1500  # bug: value ge 3000
   ```
   Expected: every probe answers in about 100 ms. Today one of them waits
   about 5 s: `_run_and_publish` logs the run failure with `logger.exception`

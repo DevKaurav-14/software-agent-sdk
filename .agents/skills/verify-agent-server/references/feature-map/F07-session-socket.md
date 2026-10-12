@@ -642,7 +642,7 @@ Preconditions:
   control-agent-server api DELETE "/api/conversations/$DEL" --expect 200 --save "F07.deleted-close/delete-$DEL"
   control-agent-server api GET "/api/conversations/$DEL" --expect 404
   control-agent-server ws listen "/sockets/session/$DEL" --duration 5 --expect-close 4004 --expect-frames 0
-  if control-agent-server ws stop "del-$DEL" --expect-open --save "F07.deleted-close/socket-$DEL"; then false; fi  # bug: opened eq true && close missing
+  control-agent-server ws stop "del-$DEL" --save "F07.deleted-close/socket-$DEL" | control-agent-server assert --check close.code exists  # bug: value.opened eq true && value.stopped eq stopped && value.close missing
   ```
   Correct behavior: the server closes the open socket (with any close code)
   while it deletes the conversation; `EventService.close()` awaits

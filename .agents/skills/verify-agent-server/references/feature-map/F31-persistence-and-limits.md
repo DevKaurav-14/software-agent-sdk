@@ -434,7 +434,7 @@ Preconditions:
   control-agent-server state cat meta.json --conversation "$F" --check title eq 'QA F31 new owner'
   control-agent-server api GET "/api/conversations/$F" --check title ne 'QA F31 stale owner' --save F31.fenced-write-no-trace/get  # bug: status eq 200 && response.body.title eq 'QA F31 stale owner'
   echo "refused PATCH answered $PS"
-  test "$PS" -lt 500  # bug: exit 1
+  control-agent-server assert --value "$PS" --check . lt 500  # bug: value eq 500
   ```
   Expected: a client error that says the conversation is owned elsewhere,
   and no visible change. The refusal itself (any error status) and
@@ -672,7 +672,7 @@ Preconditions:
   test -d "$TD"
   control-agent-server stop --run "$B" | jq -e '.server == "terminated"'
   trap 'rm -rf -- "$TD" || true' EXIT
-  test ! -e "$TD"  # bug: exit 1
+  control-agent-server assert --value "$([ -e "$TD" ] && echo true || echo false)" --check . eq false  # bug: value eq true
   trap - EXIT
   ```
   Expected: the directory is gone after a graceful stop (`stop` reports
@@ -681,7 +681,7 @@ Preconditions:
   Today the server logs `TMUX_TMPDIR not set; defaulting to per-server tmux
   directory /tmp/openhands-agent-server-<pid>`, creates it, and at shutdown
   only removes the variable from its environment (`api_lifespan`), so every
-  such start leaves a directory in the temp dir and `test ! -e` fails. The
+  such start leaves a directory in the temp dir and the `assert` fails. The
   `trap` removes the leftover after the assertion.
 - **Storage retention and disk budget (`F31.storage-retention`), blocked.**
   Needs a Docker daemon and the `conversation_image` pulled

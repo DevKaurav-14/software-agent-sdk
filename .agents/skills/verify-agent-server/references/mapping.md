@@ -177,40 +177,54 @@ Then exactly four H2 sections, in this order:
    `helper stop NAME` or `stop`.
 
    Two label markers keep the map honest without turning it red forever:
-   a bullet whose bold label says **known bug** (for example
+   **known bug** and **blocked**. A bullet whose bold label says **known
+   bug** (for example
    `**Stale secrets after update (`F08.secrets-visible`), known bug #1234.**`)
-   asserts the correct behavior and is reported as an expected failure
-   (`xfail`) while the bug lasts; when it starts passing (`xpass`) `map run`
-   fails so the marker gets removed. The command that fails because of the
-   bug ends its line with `# bug: PREDICATE`, where the predicate names the
-   documented failure, not the whole response. `map run` counts the bullet as
-   reproduced only when that command is the one that fails **and** the
-   predicate holds; a different failure at the same command (a 401, 404 or
-   503 where the bug is a 500), an arrange step that breaks first, a timeout
-   or an early exit without a confirmed assertion location is `fail`, never
-   a reproduced bug. The predicate is one of:
-
-   - `PATH OP [VALUE]` clauses joined by `&&`, matched like `--check`
-     against the JSON object the last `control-agent-server` call on the
-     marked line printed (an `api` call prints `status`, `response.status`,
-     `response.body` and its `checks`; the other verbs print their result
-     or `error`/`hint`):
-     `# bug: status eq 500 && response.body.exception contains 'has no attribute'`.
-     Pick the status plus the field or error text that identifies the bug;
-     keep the bullet's `--expect`/`--check` assertion of the correct
-     behavior unchanged. `--quiet` drops `response.body`, so match a
-     `checks.N.actual` instead or leave `--quiet` off that line.
-   - `exit N`, the marked command's exit status, for a line with no CLI
-     call: `test` exits 1 when a comparison is false and 2 when it cannot
-     run, `jq -e` 1 for false or null and 5 for an error.
-
-   `map check` rejects a missing or malformed predicate, and a `PATH OP`
-   predicate on a line that does not call the CLI. Write a negative bug
-   assertion on one line, as `if cmd; then false; fi  # bug: exit 1`, or
-   match what `cmd` printed.
-   A bullet whose label says **blocked**
+   follows the known-bug contract below. A bullet whose label says **blocked**
    names its prerequisite in prose, is reported as `blocked`, and is not
    executed. Later bullets never depend on variables set in either kind.
+
+   **The known-bug contract.** Keep these rules in step with the sibling
+   verification skills (verify-openhands in OpenHands/OpenHands,
+   verify-automation in OpenHands/automation), so a proof means the same
+   thing in each:
+
+   - The bullet asserts the **correct** behavior. The command that fails
+     because of the bug ends its line with `# bug: PREDICATE`, and the
+     predicate names the bug's own symptom: the value or error it produces,
+     not the whole response.
+   - Three outcomes. `xfail`: the marked command failed **and** its
+     predicate holds (the documented bug reproduced). `xpass`: every command
+     passed, so the correct behavior was observed; `map run` fails so the
+     marker gets removed. `fail`: anything else, including a different
+     failure at the marked command (a 401, 404 or 503 where the bug is a
+     500), an arrange step that breaks first, a timeout, or an early exit
+     without a confirmed assertion location.
+   - The predicate is `PATH OP [VALUE]` clauses joined by `&&`, matched like
+     `--check` against the JSON object the last `control-agent-server` call
+     on the marked line printed:
+     `# bug: status eq 500 && response.body.exception contains 'has no attribute'`.
+     An `api` call prints `status`, `response.status`, `response.body` and
+     its `checks`; the other verbs print their result or `error`/`hint`;
+     `--quiet` drops `response.body`, so match `checks.N.actual` or leave
+     `--quiet` off that line. A value the recipe computed (a shell variable,
+     a saved JSON file, a program's output) goes through
+     `control-agent-server assert --value|--json|stdin --check ...`, so the
+     predicate can name it: `# bug: value.status eq 200`.
+   - `exit N` (the marked command's exit status) is the last resort, for a
+     line whose symptom has no value to name, such as a TypeScript compile
+     that fails with exit 2 on a type error. It says only that the line
+     failed that way.
+   - `xpass` must mean the correct value was observed, so the marked command
+     asserts positively. `map check` rejects `if cmd; then false; fi`,
+     `! cmd` and `test !` on a `# bug` line, because an unrelated error in
+     `cmd` would read as a fix; use the verb's own expectation
+     (`ws stop --expect-close`, `api --check`) or `assert`.
+   - `map check` rejects a missing or malformed predicate, and a `PATH OP`
+     predicate on a line that does not call the CLI.
+   - A fix is proven with the baseline reproducing (`xfail`) twice and the
+     fix passing (`xpass`) twice, with the same recipe, flags and fixtures
+     (see SKILL.md, "Verify an existing fix").
 
    Include the read-only second view for every mutation (a GET, a WebSocket
    frame, a file on disk, a sink delivery), the error cases that matter (404

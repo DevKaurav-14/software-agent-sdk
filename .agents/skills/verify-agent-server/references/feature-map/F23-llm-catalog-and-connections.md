@@ -208,14 +208,14 @@ Preconditions:
 - **No Bedrock ids under a provider (`F23.models-no-bedrock`), known bug.**
   The route says Bedrock models are excluded without AWS credentials. Both
   lists are first shown to hold the provider's own ids (positive controls),
-  then each is searched for Bedrock ids, which `debug` prints to stderr.
+  then each is searched for Bedrock ids, which the `assert` prints.
   ```sh
   control-agent-server api GET /api/llm/models --query provider=deepseek --quiet --check models contains deepseek/deepseek-flash \
     --save F23.models-no-bedrock/deepseek
   control-agent-server api GET /api/llm/models --query provider=anthropic --quiet --check models len-ge 1 --save F23.models-no-bedrock/anthropic
   control-agent-server api GET /api/llm/models --query provider=anthropic --field models | jq -e 'any(.[]; startswith("claude-"))'
-  control-agent-server api GET /api/llm/models --query provider=deepseek --field models | jq -e 'map(select(test("^deepseek\\."))) | debug | length == 0'  # bug: exit 1
-  control-agent-server api GET /api/llm/models --query provider=anthropic --field models | jq -e 'map(select(test("^anthropic\\."))) | debug | length == 0'  # bug: exit 1
+  control-agent-server api GET /api/llm/models --query provider=deepseek --field models | jq -c 'map(select(test("^deepseek\\.")))' | control-agent-server assert --check . len-eq 0  # bug: value len-ge 1 && value contains deepseek.
+  control-agent-server api GET /api/llm/models --query provider=anthropic --field models | jq -c 'map(select(test("^anthropic\\.")))' | control-agent-server assert --check . len-eq 0  # bug: value len-ge 1 && value contains anthropic.claude-
   ```
   Expected: no id in the Bedrock `vendor.model` form under either provider.
   Today `?provider=deepseek` lists `deepseek.r1-v1:0`, `deepseek.v3-v1:0`
@@ -350,7 +350,7 @@ Preconditions:
     --expect 201,422 --save F23.conn-create-blank-key/placeholder | jq -r .status)
   control-agent-server api GET /api/llm/provider-connections --save F23.conn-create-blank-key/list
   echo "whitespace key: $S_SPACE, placeholder key: $S_MASK"
-  test "$S_SPACE $S_MASK" = '422 422'  # bug: exit 1
+  control-agent-server assert --value "$S_SPACE $S_MASK" --check . eq '422 422'  # bug: value eq '201 201'
   control-agent-server api GET /api/llm/provider-connections --check . len-eq 2 --check . not-contains qa-f23-blank-
   ```
   Expected: both are 422 like `""`, and nothing is created. Today both are
@@ -461,7 +461,7 @@ Preconditions:
     control-agent-server api PATCH "/api/llm/provider-connections/$DEF" --json '{"api_key": "sk-qa-f23-default"}' --expect 200 --quiet > /dev/null
   done
   echo "applied keys: $APPLIED"
-  test "$APPLIED" = '[sk-qa-f23-default][sk-qa-f23-default][sk-qa-f23-default]'  # bug: exit 1
+  control-agent-server assert --value "$APPLIED" --check . eq '[sk-qa-f23-default][sk-qa-f23-default][sk-qa-f23-default]'  # bug: value eq '[null][null][**********]'
   ```
   Before any blank `PATCH`, activating the probe applies
   `sk-qa-f23-default` (positive control).

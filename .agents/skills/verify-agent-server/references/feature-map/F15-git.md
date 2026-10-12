@@ -306,12 +306,12 @@ Preconditions:
     --check 0.path eq README.md --check 1.path eq notes.txt --check 2.path eq src/app.py --check 3.path eq src/new.py
   control-agent-server api GET /api/git/changes --query path="$F/subdir/src" --expect 200 \
     --raw-out "$F/subdir.json" --save F15.changes-subdir-paths/src
-  python3 - "$F/subdir.json" "$F/subdir/src" "$F/subdir" <<'PY'  # bug: exit 1
+  python3 - "$F/subdir.json" "$F/subdir/src" "$F/subdir" <<'PY' | control-agent-server assert --check paths len-ge 1 --check bases len-ge 1  # bug: value.paths eq '["README.md", "new.py", "src/app.py"]' && value.bases len-eq 0
   import json, os, sys
   changes = json.load(open(sys.argv[1]))
-  paths = [c["path"] for c in changes if c["status"] != "DELETED"]
+  paths = sorted(c["path"] for c in changes if c["status"] != "DELETED")
   bases = [b for b in sys.argv[2:] if all(os.path.exists(os.path.join(b, p)) for p in paths)]
-  assert paths and bases, f"no single base resolves every path: {changes}"
+  print(json.dumps({"paths": paths, "bases": bases}))
   PY
   ```
   The repository root lists all four changes on one base (positive
@@ -423,7 +423,8 @@ Preconditions:
   for name in crlf lead trail; do
     control-agent-server api GET /api/git/diff --query path="$F/ws-files/$name.txt" --query ref=HEAD --expect 200 \
       --check modified len-ge 1 --raw-out "$F/ws-$name.json" --save "F15.diff-whitespace/$name"
-    python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["original"] == d["modified"], d' "$F/ws-$name.json"  # bug: exit 1
+    jq '{original, modified, same: (.original == .modified), strip_only: (.original == (.modified | gsub("^\\s+|\\s+$"; "")))}' "$F/ws-$name.json" \
+      | control-agent-server assert --check same eq true  # bug: value.same eq false && value.strip_only eq true
   done
   ```
   Expected: identical sides for every unchanged file (`changes` is `[]`).
