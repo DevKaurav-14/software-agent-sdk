@@ -194,9 +194,9 @@ Preconditions:
   control-agent-server api POST /api/file/create_directory --query path="$F/v2.txt/child" --expect 400 \
     --check detail eq 'Path exists and is not a directory'
   control-agent-server api POST /api/file/upload --query path="$F/xfer/is-a-dir" --file file="$F/v2.txt" \
-    --expect 4xx --save F14.upload-onto-directory/upload  # bug
+    --expect 4xx --save F14.upload-onto-directory/upload  # bug: status eq 500 && response.body.exception contains 'Is a directory'
   control-agent-server api POST /api/file/upload --query path="$F/v2.txt/child" --file file="$F/v2.txt" \
-    --expect 4xx --save F14.upload-onto-directory/parent-is-file  # bug
+    --expect 4xx --save F14.upload-onto-directory/parent-is-file  # bug: status eq 500 && response.body.exception contains 'File exists'
   ```
   Expected: a 4xx such as 400 `Path exists and is not a directory`, as
   `create_directory` answers for the same collisions. Actual:
@@ -253,8 +253,8 @@ Preconditions:
   control-agent-server exec --expect-output TS_UPLOAD_OK --save F14.upload-size/ts -- node "$F/ts_size.mjs" "$F"
   control-agent-server api POST /api/file/upload --query path="$F/size/rest.bin" --file file="$F/blob.bin" --expect 200 \
     --check success eq true --save F14.upload-size/rest
-  test "$(cat "$F/sdk-size.txt")" = 70000  # bug
-  test "$(cat "$F/ts-size.txt")" = 70000  # bug
+  test "$(cat "$F/sdk-size.txt")" = 70000  # bug: exit 1
+  test "$(cat "$F/ts-size.txt")" = 70000  # bug: exit 1
   ```
   Expected: both remote workspaces report `file_size` 70000, as
   `LocalWorkspace` does. Actual: every upload lands intact, but the server
@@ -283,7 +283,7 @@ Preconditions:
     --expect 5xx --check exception contains 'File too large' --save F14.upload-atomic/failed-overwrite
   prlimit --pid "$B2_PID" --fsize=unlimited:
   control-agent-server doctor --run "$B2"
-  cmp "$F/v2.txt" "$AT/target.txt"  # bug
+  cmp "$F/v2.txt" "$AT/target.txt"  # bug: exit 1
   ```
   Without the limit the 900 kB blob uploads intact (so the size alone is not
   the problem) and the small file is in place. Under the limit the overwrite
@@ -399,7 +399,7 @@ Preconditions:
   test "$CASE_FIRST" = Foo -o "$CASE_FIRST" = foo
   control-agent-server api GET /api/file/search_subdirs --query path="$CASE_DIR" --query limit=1 --query page_id="$CASE_NEXT" \
     --expect 200 --check items len-eq 1 --check items.0.name eq "$CASE_OTHER" --check next_page_id missing \
-    --save F14.subdirs-case-pagination/page-2  # bug
+    --save F14.subdirs-case-pagination/page-2  # bug: status eq 200 && response.body.next_page_id eq foo && checks.1.ok eq false
   ```
   Page one holds one twin and a cursor. Expected: page two holds exactly the
   other twin and no cursor. Actual: the cursor is `foo`, the lowercase name,
@@ -593,7 +593,7 @@ Preconditions:
     --raw-out "$F/doc-parent.tgz" --save F14.archive-format-doc/tar
   tar tzf "$F/doc-parent.tgz" > "$F/doc-parent.list"
   grep -q 'proj/notes.txt$' "$F/doc-parent.list"
-  if printf '%s\n' "$DOC_FORMAT" | grep -q 'entire directory' && test -z "$(grep 'top.txt' "$F/doc-parent.list")"; then false; fi  # bug
+  if printf '%s\n' "$DOC_FORMAT" | grep -q 'entire directory' && test -z "$(grep 'top.txt' "$F/doc-parent.list")"; then false; fi  # bug: exit 1
   ```
   Expected: the description and the archive agree, either by documenting
   that a directory holding exactly one repository archives only that
@@ -674,7 +674,7 @@ Preconditions:
   SH
   control-agent-server exec --env CID="$CID" --env CC="$CC" --save F14.trajectory-concurrent/burst -- sh "$CC/burst.sh"
   test -s "$CC/1-6.status"
-  for s in "$CC"/[1-5]-[1-6].status; do test "$(cat "$s")" = 200; test -s "${s%.status}.zip"; python3 -m zipfile -t "${s%.status}.zip" > /dev/null; done  # bug
+  for s in "$CC"/[1-5]-[1-6].status; do test "$(cat "$s")" = 200; test -s "${s%.status}.zip"; python3 -m zipfile -t "${s%.status}.zip" > /dev/null; done  # bug: exit 1
   ```
   A single download is a valid zip. Expected: every concurrent download is
   200 with a valid zip, in all five rounds. Actual: every handler writes the
@@ -846,9 +846,9 @@ Preconditions:
   BCID=$(control-agent-server conversation start --run "$B" --tools file_editor --no-autotitle --print-id)
   test -d "$BP/$(printf '%s' "$BCID" | tr -d -)"
   control-agent-server api GET "/api/conversations/$BCID" --run "$B" --expect 200 --check id eq "$BCID"
-  control-agent-server api GET "/api/file/download-trajectory/$BCID" --run "$B" --expect 200 --save F14.trajectory-init-path/global  # bug
+  control-agent-server api GET "/api/file/download-trajectory/$BCID" --run "$B" --expect 200 --save F14.trajectory-init-path/global  # bug: status eq 404 && response.body.detail eq 'Conversation not found'
   control-agent-server api GET "/api/conversations/$BCID/file/download-trajectory/$BCID" --run "$B" --expect 200 \
-    --save F14.trajectory-init-path/scoped  # bug
+    --save F14.trajectory-init-path/scoped  # bug: status eq 404 && response.body.detail eq 'Conversation not found'
   ```
   The conversation is persisted under the init-time path and `GET` finds it.
   Expected: both trajectory routes return the zip (each alone encodes the

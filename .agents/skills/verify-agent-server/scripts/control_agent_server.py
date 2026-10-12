@@ -52,6 +52,10 @@ CLI = "control-agent-server"
 RUN_ENV = "AGENT_SERVER_VERIFY_RUN"
 HOME_ENV = "AGENT_SERVER_VERIFY_HOME"
 CHECKOUT_ENV = "AGENT_SERVER_VERIFY_CHECKOUT"
+# Set by `map run` for each bullet: every CLI call empties this file when it
+# starts and writes the JSON object it prints, so a `# bug: PATH OP VALUE`
+# predicate can be matched against what the failing command observed.
+OBSERVATION_ENV = "AGENT_SERVER_VERIFY_OBSERVATION"
 SESSION_HEADER = "X-Session-API-Key"
 FAMILY_FILE_RE = re.compile(r"^F(\d{2})-[a-z0-9-]+\.md$")
 SUB_FEATURE_RE = re.compile(r"^- `(F\d{2}\.[a-z0-9][a-z0-9-]*)`: \S")
@@ -134,7 +138,12 @@ for _name in ("DEEPSEEK_API_KEY", "LLM_API_KEY", "OPENHANDS_API_KEY"):
 
 
 def emit(payload: dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(REDACT.obj(payload), indent=2, default=str) + "\n")
+    text = json.dumps(REDACT.obj(payload), indent=2, default=str)
+    sys.stdout.write(text + "\n")
+    observation = os.environ.get(OBSERVATION_ENV)
+    if observation:
+        with contextlib.suppress(OSError):
+            Path(observation).write_text(text)
 
 
 def now_iso() -> str:
@@ -3186,6 +3195,9 @@ def cmd_helper_start(args: argparse.Namespace) -> dict[str, Any]:
             stdout=log,
             stderr=subprocess.STDOUT,
             start_new_session=True,
+            # A helper outlives the bullet: keep its output out of the
+            # observation that `# bug:` predicates read.
+            env={k: v for k, v in os.environ.items() if k != OBSERVATION_ENV},
         )
     entry = {
         "name": args.name,
@@ -3795,7 +3807,7 @@ def check_family(path: Path, routes: Sequence[dict[str, Any]] | None) -> list[st
                 f"line {bullet.line}: bullet '{bullet.label}' names no sub-feature ID"
             )
         known_bug = "known bug" in bullet.label.lower()
-        marked = bool(bug_ranges(bullet.script))
+        marked = bool(bug_marks(bullet.script))
         if known_bug and not blocked and not marked:
             problems.append(
                 f"line {bullet.line}: known-bug bullet '{bullet.label}' marks no "
@@ -3807,6 +3819,19 @@ def check_family(path: Path, routes: Sequence[dict[str, Any]] | None) -> list[st
                 f"line {bullet.line}: bullet '{bullet.label}' has a `# bug` marker "
                 "but its label does not say known bug"
             )
+        for mark in bug_marks(bullet.script) if known_bug else []:
+            try:
+                clauses = parse_bug_predicate(mark.predicate)
+            except ValueError as exc:
+                problems.append(f"line {bullet.line}: bullet '{bullet.label}': {exc}")
+                continue
+            if clauses[0][0] != "exit" or len(clauses[0]) != 2:
+                if CLI not in mark.command:
+                    problems.append(
+                        f"line {bullet.line}: bullet '{bullet.label}': "
+                        f"`# bug: {mark.predicate}` reads a {CLI} result, but "
+                        f"the marked command does not call {CLI}; use `exit N`"
+                    )
     for command in extract_commands(text):
         error = validate_command(command)
         if error:
@@ -3980,7 +4005,7 @@ def parse_exclusions() -> set[str]:
 
 
 BULLET_RE = re.compile(r"^- \*\*(.+?)\*\*")
-BUG_MARK_RE = re.compile(r"\s#\s*bug\s*$")
+BUG_MARK_RE = re.compile(r"\s#\s*bug\b(?::(?P<predicate>.*))?\s*$")
 FENCE_RE = re.compile(r"^\s*```(\w*)\s*$")
 ASSIGN_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=", re.MULTILINE)
 
@@ -3995,21 +4020,95 @@ class Bullet:
     needs: list[str] = field(default_factory=list)
 
 
-def bug_ranges(script: str) -> list[tuple[int, int]]:
-    """Line ranges (1-based, in the bullet script) of commands marked `# bug`.
+@dataclass
+class BugMark:
+    """A command marked `# bug: PREDICATE`, as lines of the bullet script."""
+
+    first: int
+    last: int
+    command: str
+    predicate: str
+
+
+def bug_marks(script: str) -> list[BugMark]:
+    """Commands marked `# bug` (1-based line ranges in the bullet script).
 
     The marker ends the command's last line; a command continued with `\\`
     starts at the first line of the continuation.
     """
     lines = script.splitlines()
-    ranges = []
+    marks = []
     for number, line in enumerate(lines, 1):
-        if BUG_MARK_RE.search(line):
+        match = BUG_MARK_RE.search(line)
+        if match:
             first = number
             while first > 1 and lines[first - 2].rstrip().endswith("\\"):
                 first -= 1
-            ranges.append((first, number))
-    return ranges
+            marks.append(
+                BugMark(
+                    first,
+                    number,
+                    "\n".join(lines[first - 1 : number]),
+                    (match.group("predicate") or "").strip(),
+                )
+            )
+    return marks
+
+
+def parse_bug_predicate(text: str) -> list[list[str]]:
+    """The clauses of a `# bug:` predicate: the documented failure's identity.
+
+    Either `exit N` (the marked command's exit status, for `test`, `jq -e`
+    and other plain commands) or one or more `PATH OP [VALUE]` clauses joined
+    by `&&`, matched like `--check` against the JSON object the last
+    control-agent-server call on the marked line printed, for example
+    `status eq 500 && response.body.exception contains 'has no attribute'`.
+    """
+    if not text:
+        raise ValueError(
+            "a `# bug` marker needs the documented failure: "
+            "`# bug: status eq 500` or `# bug: exit 1`"
+        )
+    try:
+        tokens = shlex.split(text)
+    except ValueError as exc:
+        raise ValueError(f"cannot parse `# bug: {text}`: {exc}") from None
+    clauses: list[list[str]] = [[]]
+    for token in tokens:
+        if token == "&&":
+            clauses.append([])
+        else:
+            clauses[-1].append(token)
+    for clause in clauses:
+        if len(clause) == 2 and clause[0] == "exit":
+            if not clause[1].isdigit() or not 0 < int(clause[1]) < 256:
+                raise ValueError(f"`exit {clause[1]}` needs a status from 1 to 255")
+            if len(clauses) > 1:
+                raise ValueError("`exit N` stands alone; it cannot be joined")
+            continue
+        if len(clause) < 2 or clause[1] not in CHECK_OPS:
+            raise ValueError(
+                f"`{' '.join(clause)}` is not PATH OP [VALUE] with OP in "
+                f"{', '.join(CHECK_OPS)}"
+            )
+        takes_value = clause[1] not in ("exists", "missing")
+        if len(clause) != (3 if takes_value else 2):
+            raise ValueError(
+                f"`{' '.join(clause)}`: {clause[1]} takes "
+                + ("one value" if takes_value else "no value")
+            )
+    return clauses
+
+
+def bug_predicate_matches(
+    clauses: list[list[str]], exit_status: int | None, observation: Any
+) -> bool:
+    """Whether the observed failure is the one the `# bug` predicate documents."""
+    if clauses[0][0] == "exit" and len(clauses[0]) == 2:
+        return exit_status == int(clauses[0][1])
+    if not isinstance(observation, dict):
+        return False
+    return all(evaluate_check(observation, clause)["ok"] for clause in clauses)
 
 
 def driving_bullets(path: Path) -> list[Bullet]:
@@ -4544,13 +4643,23 @@ def replay_family(run: Run, path: Path, args: argparse.Namespace) -> dict[str, A
         )
         failure = run.dir / "map-run" / f"{path.stem}.failed"
         failure.unlink(missing_ok=True)
+        observation = run.dir / "map-run" / f"{path.stem}.observation.json"
+        observation.unlink(missing_ok=True)
+        # The ERR trap copies the observation at the failing command, before a
+        # recipe's own EXIT cleanup calls the CLI again.
+        observed_at_failure = observation.with_suffix(".failed.json")
+        observed_at_failure.unlink(missing_ok=True)
         preamble = [
             "set -eo pipefail",
             f"source {shlex_quote(str(state))}",
             f"cd {shlex_quote(str(checkout))}",
-            'trap \'printf "%s\\t%s\\n" "$LINENO" "$BASH_COMMAND" > '
+            'trap \'printf "%s\\t%s\\t%s\\n" "$?" "$LINENO" "$BASH_COMMAND" > '
             + shlex_quote(str(failure))
-            + "' ERR",
+            + "; cp -f "
+            + shlex_quote(str(observation))
+            + " "
+            + shlex_quote(str(observed_at_failure))
+            + " 2>/dev/null' ERR",
         ]
         script = "\n".join(preamble) + f"\n{bullet.script}{save_state}"
         if args.dry_run:
@@ -4561,17 +4670,25 @@ def replay_family(run: Run, path: Path, args: argparse.Namespace) -> dict[str, A
         started = time.monotonic()
         recipe_path = run.private / f"{path.stem}.recipe.sh"
         recipe_path.write_text(script)
-        code, out, err, timed_out = execute_recipe(recipe_path, env, args.timeout)
+        code, out, err, timed_out = execute_recipe(
+            recipe_path, {**env, OBSERVATION_ENV: str(observation)}, args.timeout
+        )
         elapsed = int((time.monotonic() - started) * 1000)
         failed_line: int | None = None
         failed_command: str | None = None
+        failed_status: int | None = None
+        observed: Any = None
         if code != 0 and failure.exists():
-            line_text, _, failed_command = (
-                failure.read_text().rstrip("\n").partition("\t")
-            )
+            status_text, _, rest = failure.read_text().rstrip("\n").partition("\t")
+            line_text, _, failed_command = rest.partition("\t")
+            if status_text.isdigit():
+                failed_status = int(status_text)
             if line_text.isdigit():
                 failed_line = int(line_text) - len(preamble)
             failed_command = REDACT.text(failed_command)[:500]
+            if observed_at_failure.exists():
+                with contextlib.suppress(OSError, ValueError):
+                    observed = json.loads(observed_at_failure.read_text())
         transcript = {
             "file": path.name,
             "bullet": bullet.label,
@@ -4582,6 +4699,8 @@ def replay_family(run: Run, path: Path, args: argparse.Namespace) -> dict[str, A
             "elapsed_ms": elapsed,
             "failed_line": failed_line,
             "failed_command": failed_command,
+            "failed_status": failed_status,
+            "observation": observed,
             "stdout": out,
             "stderr": err,
         }
@@ -4590,16 +4709,28 @@ def replay_family(run: Run, path: Path, args: argparse.Namespace) -> dict[str, A
             run, f"map-run/{path.stem}-{index:02d}-{slug}", transcript
         )
         known_bug = "known bug" in marker
-        ranges = bug_ranges(bullet.script)
-        assertion_failed = (
-            not timed_out
-            and failed_line is not None
-            and any(first <= failed_line <= last for first, last in ranges)
+        mark = next(
+            (
+                m
+                for m in bug_marks(bullet.script)
+                if not timed_out
+                and failed_line is not None
+                and m.first <= failed_line <= m.last
+            ),
+            None,
         )
+        documented = False
+        predicate_error: str | None = None
+        if known_bug and code != 0 and mark is not None:
+            try:
+                clauses = parse_bug_predicate(mark.predicate)
+                documented = bug_predicate_matches(clauses, failed_status, observed)
+            except ValueError as exc:
+                predicate_error = str(exc)
         if known_bug and code == 0:
             status = "xpass"
             xpassed = True
-        elif known_bug and code != 0 and assertion_failed:
+        elif known_bug and documented:
             status = "xfail"
         else:
             status = "pass" if code == 0 else "fail"
@@ -4618,10 +4749,24 @@ def replay_family(run: Run, path: Path, args: argparse.Namespace) -> dict[str, A
             row["failed_command"] = failed_command
             row["stdout_tail"] = REDACT.text(out[-1200:])
             row["stderr_tail"] = REDACT.text(err[-1200:])
-        if known_bug and status == "fail":
+        if known_bug and mark is not None:
+            row["bug_predicate"] = mark.predicate
+        if known_bug and status == "fail" and mark is None:
             row["hint"] = (
                 "no failure was confirmed at the `# bug` assertion; "
                 "the bug was not reproduced"
+            )
+        elif known_bug and status == "fail":
+            row["failed_status"] = failed_status
+            if isinstance(observed, dict):
+                row["observed"] = {
+                    k: observed[k]
+                    for k in ("status", "hint", "error", "checks")
+                    if k in observed
+                }
+            row["hint"] = predicate_error or (
+                "the `# bug` command failed, but not with the documented "
+                f"failure (`# bug: {mark.predicate}`); the bug was not reproduced"
             )
         if status == "xpass":
             row["hint"] = "the known bug no longer reproduces: update the map"
@@ -5879,8 +6024,12 @@ repository root, with this run exported. Shell variables assigned in one
 bullet (CID=..., export X=...) are carried into later bullets. A bullet fails
 when any command exits non-zero, so recipes encode their expectations with
 --expect, --check, --expect-kind and `test`. A bullet whose label says
-"known bug" is an expected failure (xfail; an unexpected pass, xpass, fails
-the run so the map gets updated). A bullet whose label says "blocked" is
+"known bug" is an expected failure (xfail) only when the command marked
+`# bug: PREDICATE` fails with the documented failure: `exit N`, or `PATH OP
+[VALUE]` clauses joined by `&&` and matched like --check against the JSON the
+last control-agent-server call on that line printed (`# bug: status eq 500`).
+Any other failure is a fail; an unexpected pass, xpass, fails the run so the
+map gets updated. A bullet whose label says "blocked" is
 reported and not executed. Transcripts are saved under <run>/evidence/map-run/.""",
     )
     add_run_flag(mrun)
@@ -5985,6 +6134,10 @@ def main(argv: list[str] | None = None) -> int:
     if head[:1] == ["_llm-stub"]:
         serve_llm_stub(int(head[1]), Path(head[2]), Path(head[3]))
         return 0
+    observation = os.environ.get(OBSERVATION_ENV)
+    if observation:
+        with contextlib.suppress(OSError):
+            Path(observation).unlink()
     parser = build_parser()
     if not head:
         parser.print_help()

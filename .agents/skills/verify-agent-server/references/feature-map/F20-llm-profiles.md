@@ -436,7 +436,7 @@ Preconditions:
   wait "$SAVER"
   wait "$LOCKER"
   control-agent-server api GET /api/profiles/qa-busy --expect 404
-  jq -e '.elapsed_ms <= 3000' "$F20/busy-alive.json"  # bug
+  jq -e '.elapsed_ms <= 3000' "$F20/busy-alive.json"  # bug: exit 1
   ```
   Expected `/alive` to answer within 3 seconds while the save waits, as it
   does with the lock free. Today it answers 200 only when the save gives up,
@@ -508,7 +508,7 @@ Preconditions:
     --json '{"llm": {"model": "deepseek/deepseek-flash", "api_key": "sk-qa-f20-invalid-key", "num_retries": 0}}' \
     --check valid eq false --check error.message contains authentication_error --check error.message not-contains sk-qa-f20-invalid-key \
     --save F20.validate-bad-key-type/deepseek-401 | tee "$F20/bad-key.json"
-  jq -e '.response.body.error.type == "LLMAuthenticationError"' "$F20/bad-key.json"  # bug
+  jq -e '.response.body.error.type == "LLMAuthenticationError"' "$F20/bad-key.json"  # bug: exit 1
   ```
   The call itself proves the case: `valid: false`, and the provider's error
   passed through in `error.message` is DeepSeek's typed
@@ -583,7 +583,7 @@ Preconditions:
     --json '{"llm": {"model": "openai/qa-unreachable", "base_url": "http://127.0.0.1:9/v1", "api_key": "qa-key"}}' \
     --check valid eq false --check error.type eq LLMServiceUnavailableError \
     --save F20.validate-unreachable-bounded/default-retries | tee "$F20/unreachable.json"
-  jq -e '.elapsed_ms <= 30000' "$F20/unreachable.json"  # bug
+  jq -e '.elapsed_ms <= 30000' "$F20/unreachable.json"  # bug: exit 1
   ```
   The client waits long enough for the server's own answer, so the call
   proves the server is up and its verdict is right (`valid: false`,
@@ -607,7 +607,7 @@ Preconditions:
   control-agent-server restart --hard
   control-agent-server api GET /api/profiles --expect 200 --check active_profile eq deepseek-flash
   test "$RC" = 0 || jq -e '.exit == 3 and (.error // "" | startswith("ReadTimeout"))' "$F20/hang.json"
-  test "$RC" = 0  # bug
+  test "$RC" = 0  # bug: exit 1
   ```
   Expected a verdict within 30 s (the CLI's `--timeout 30` is the bound).
   Today the CLI gives up with a client `ReadTimeout`, so `test "$RC" = 0`
@@ -891,8 +891,8 @@ Preconditions:
   control-agent-server api DELETE /api/agent-profiles/qa-f20-alias-agent --expect 200
   control-agent-server api DELETE /api/profiles/qa-alias --expect 200
   control-agent-server api GET /api/profiles --check profiles not-contains '"name": "qa-alias"'
-  jq -e '.status == 409' "$F20/alias-delete.json"  # bug
-  jq -e '.status == 200' "$F20/alias-after.json"  # bug
+  jq -e '.status == 409' "$F20/alias-delete.json"  # bug: exit 1
+  jq -e '.status == 200' "$F20/alias-after.json"  # bug: exit 1
   ```
   Expected the alias delete to be 409 like the plain one (positive control:
   `DELETE /api/profiles/qa-alias` is 409, and `GET .../qa-alias.json` reads
@@ -922,7 +922,7 @@ Preconditions:
   control-agent-server state cat home/.openhands/profiles/qa-rotate.json --check api_key matches '^gAAAAA'
   control-agent-server api GET /api/profiles/qa-rotate --header 'X-Expose-Secrets: plaintext' --expect 2xx,4xx --save F20.secret-key-rotation/detail
   control-agent-server api GET /api/profiles --expect 2xx,4xx --save F20.secret-key-rotation/list
-  control-agent-server api POST /api/profiles/qa-rotate/activate --expect 4xx --save F20.secret-key-rotation/activate  # bug
+  control-agent-server api POST /api/profiles/qa-rotate/activate --expect 4xx --save F20.secret-key-rotation/activate  # bug: status eq 200 && response.body.message contains 'activated and applied'
   control-agent-server api GET /api/settings --max-chars 200 --check active_profile eq deepseek-flash
   control-agent-server state cat home/.openhands/settings.json --max-chars 200 --check agent_settings.llm.api_key matches '^gAAAAA'
   ```

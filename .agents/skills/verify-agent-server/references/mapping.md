@@ -182,12 +182,32 @@ Then exactly four H2 sections, in this order:
    asserts the correct behavior and is reported as an expected failure
    (`xfail`) while the bug lasts; when it starts passing (`xpass`) `map run`
    fails so the marker gets removed. The command that fails because of the
-   bug ends its line with `# bug`; `map run` counts the bullet as reproduced
-   only when that command is the one that fails, and reports `fail` when an
-   arrange step breaks first (`map check` requires the marker). A timeout or an
-   early exit without a confirmed assertion location is a failure, never a
-   reproduced bug. Write a
-   negative bug assertion on one line, as `if cmd; then false; fi  # bug`.
+   bug ends its line with `# bug: PREDICATE`, where the predicate names the
+   documented failure, not the whole response. `map run` counts the bullet as
+   reproduced only when that command is the one that fails **and** the
+   predicate holds; a different failure at the same command (a 401, 404 or
+   503 where the bug is a 500), an arrange step that breaks first, a timeout
+   or an early exit without a confirmed assertion location is `fail`, never
+   a reproduced bug. The predicate is one of:
+
+   - `PATH OP [VALUE]` clauses joined by `&&`, matched like `--check`
+     against the JSON object the last `control-agent-server` call on the
+     marked line printed (an `api` call prints `status`, `response.status`,
+     `response.body` and its `checks`; the other verbs print their result
+     or `error`/`hint`):
+     `# bug: status eq 500 && response.body.exception contains 'has no attribute'`.
+     Pick the status plus the field or error text that identifies the bug;
+     keep the bullet's `--expect`/`--check` assertion of the correct
+     behavior unchanged. `--quiet` drops `response.body`, so match a
+     `checks.N.actual` instead or leave `--quiet` off that line.
+   - `exit N`, the marked command's exit status, for a line with no CLI
+     call: `test` exits 1 when a comparison is false and 2 when it cannot
+     run, `jq -e` 1 for false or null and 5 for an error.
+
+   `map check` rejects a missing or malformed predicate, and a `PATH OP`
+   predicate on a line that does not call the CLI. Write a negative bug
+   assertion on one line, as `if cmd; then false; fi  # bug: exit 1`, or
+   match what `cmd` printed.
    A bullet whose label says **blocked**
    names its prerequisite in prose, is reported as `blocked`, and is not
    executed. Later bullets never depend on variables set in either kind.

@@ -221,7 +221,7 @@ Preconditions:
   trap drop_empty EXIT
   control-agent-server api GET /api/meta-profiles/qa-empty --expect 404
   control-agent-server api POST /api/meta-profiles/qa-empty --json '{"classifier_model": "deepseek-flash"}' --expect 422 \
-    --save F22.empty-router/save  # bug
+    --save F22.empty-router/save  # bug: status eq 201 && response.body.name eq qa-empty
   control-agent-server api GET /api/meta-profiles/qa-empty --expect 404
   control-agent-server api GET /api/meta-profiles --check meta_profiles len-eq 2
   ```
@@ -472,7 +472,7 @@ Preconditions:
     | tee "$F22/acp-activate.json"
   control-agent-server api GET /api/meta-profiles --check active_meta_profile eq null --save F22.activate-acp/list
   control-agent-server api GET /api/settings --max-chars 200 --check active_meta_profile eq null --check agent_settings.agent_kind eq acp
-  jq -e '.status >= 400 and .status < 500' "$F22/acp-activate.json"  # bug
+  jq -e '.status >= 400 and .status < 500' "$F22/acp-activate.json"  # bug: exit 1
   ```
   Expected a 4xx: settings that cannot attach the routing tool should refuse
   the activation, the way `PersistedSettings` refuses to record it. Today the
@@ -529,7 +529,7 @@ Preconditions:
   test "$(cat "$S")" = '{"agent_settings": '
   restore_settings
   control-agent-server api GET /api/meta-profiles --check active_meta_profile eq qa-direct
-  jq -e '.status == 409' "$F22/corrupt-settings-activate.json"  # bug
+  jq -e '.status == 409' "$F22/corrupt-settings-activate.json"  # bug: exit 1
   ```
   Expected 409, as `POST /api/profiles/{name}/activate` answers for the same
   file (`Settings file is corrupted or encrypted with a different key`; the
@@ -605,7 +605,7 @@ Preconditions:
   wait "$SAVER"
   wait "$LOCKER"
   control-agent-server api GET /api/meta-profiles/qa-busy --expect 404
-  test "$SLOW" = 0  # bug
+  test "$SLOW" = 0  # bug: exit 1
   ```
   Expected every `/alive` probe to answer within 3 seconds while the save
   waits. Today the first probe that overlaps the save takes about 28
@@ -665,7 +665,7 @@ Preconditions:
   control-agent-server api POST /api/meta-profiles/qa-tilde/activate --run "$T" --expect 200
   control-agent-server api GET /api/meta-profiles --run "$T" --check meta_profiles len-eq 1 --check active_meta_profile eq qa-tilde
   control-agent-server state ls 'home/qa-f22-tilde/settings.json' --run "$T" --expect-count 1
-  control-agent-server state ls 'home/qa-f22-tilde/meta-profiles/qa-tilde.json' --run "$T" --expect-count 1  # bug
+  control-agent-server state ls 'home/qa-f22-tilde/meta-profiles/qa-tilde.json' --run "$T" --expect-count 1  # bug: count eq 0
   ```
   `settings.json` lands in `home/qa-f22-tilde/` (the settings store expands
   `~` through `get_user_persistence_dir`). Expected the meta-profile next to
