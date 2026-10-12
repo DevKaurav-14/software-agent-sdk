@@ -58,6 +58,12 @@ the surface under test is the REST and WebSocket API rather than a screen.
   table between BASE and TARGET and routes changed files to families with
   `map owners`, then relies on the existing oasdiff breakage check for schema
   changes instead of re-deriving it.
+- **A daily pass between weekly ones.** pstack's maintenance loop asks for a
+  live pass over every feature each time. That cannot fit in a day, so
+  [daily.md](daily.md) follows `verify-openhands`' daily pass: the families
+  changed since the recorded baseline, a smoke recipe per family, and a
+  date-derived rotation that covers every family's full recipes once a week.
+  `map baseline` and `map rotation` keep that free of state between runs.
 - **Isolation by configuration.** Every run gets a private `HOME`,
   `OH_PERSISTENCE_DIR`, config file, conversations and workspace paths,
   worktree root, tmux dir, session key, secret key and port, and inherits none
