@@ -4626,6 +4626,9 @@ def replay_family(run: Run, path: Path, args: argparse.Namespace) -> dict[str, A
     results = []
     failed = False
     xpassed = False
+    # Labels and ids of bullets that failed: a known bug whose arrange did not
+    # run (with --keep-going) cannot show the correct behavior.
+    broken: set[str] = set()
     unavailable: dict[int, list[str]] = {}
     if not args.dry_run and any(recipe_needs(bullets).values()):
         unavailable = blocked_recipes(bullets, machine_capabilities())
@@ -4775,14 +4778,17 @@ def replay_family(run: Run, path: Path, args: argparse.Namespace) -> dict[str, A
                 documented = bug_predicate_matches(clauses, failed_status, observed)
             except ValueError as exc:
                 predicate_error = str(exc)
-        if known_bug and code == 0:
+        unarranged = sorted(broken.intersection(["Preconditions", *bullet.requires]))
+        if known_bug and code == 0 and not unarranged:
             status = "xpass"
             xpassed = True
         elif known_bug and documented:
             status = "xfail"
         else:
-            status = "pass" if code == 0 else "fail"
-            failed = failed or code != 0
+            status = "pass" if code == 0 and not known_bug else "fail"
+            failed = failed or status == "fail"
+        if status == "fail":
+            broken.update([bullet.label, *bullet.ids])
         row: dict[str, Any] = {
             "bullet": bullet.label,
             "ids": bullet.ids,
@@ -4818,6 +4824,11 @@ def replay_family(run: Run, path: Path, args: argparse.Namespace) -> dict[str, A
             )
         if status == "xpass":
             row["hint"] = "the known bug no longer reproduces: update the map"
+        elif known_bug and code == 0:
+            row["hint"] = (
+                f"passed, but {', '.join(unarranged)} failed earlier in this run, "
+                "so the pass does not show the correct behavior"
+            )
         results.append(row)
         if args.record and bullet.ids:
             note = {

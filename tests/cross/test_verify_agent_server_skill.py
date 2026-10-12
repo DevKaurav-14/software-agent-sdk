@@ -921,6 +921,24 @@ def test_known_bug_matches_the_failure_not_a_later_cleanup_call(
     assert bug["status"] == "xfail", out
 
 
+def test_known_bug_pass_after_a_broken_arrange_is_not_a_fix(
+    run_dir, write_verification_family, capsys
+):
+    # With --keep-going, a recipe whose prerequisite failed can pass on empty
+    # variables; that is no evidence the bug is fixed.
+    family = FAMILY.replace(
+        "VALUE=$(echo carried)", "VALUE=$(echo carried)\n  false"
+    ).replace(
+        '  test "$VALUE" = carried\n  test "$VALUE" = fixed  # bug: exit 1',
+        "  true  # bug: exit 1",
+    )
+    write_verification_family(cas, family)
+    code, out = _run(capsys, "map", "run", "--file", "F98", "--keep-going")
+    bug = next(r for r in json.loads(out)["bullets"] if r.get("ids") == ["F98.bug"])
+    assert bug["status"] == "fail", out
+    assert "F98.second" in bug["hint"]
+
+
 def test_known_bug_exit_predicate_tells_a_false_test_from_an_error(
     run_dir, write_verification_family, capsys
 ):
