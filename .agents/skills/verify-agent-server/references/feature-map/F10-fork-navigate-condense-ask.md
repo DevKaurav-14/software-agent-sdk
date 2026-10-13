@@ -260,7 +260,7 @@ SIDE_AGENT="{\"llm\": {\"model\": \"openai/qa-stub\", \"api_key\": \"qa-stub-key
   ```sh
   KF=$(control-agent-server api POST "/api/conversations/$S/fork" --expect 201 --field id)
   control-agent-server state cat base_state.json --conversation "$S" --max-chars 200 --check agent.llm.api_key exists --check agent.condenser.llm.api_key exists
-  control-agent-server state cat base_state.json --conversation "$KF" --max-chars 200 --check agent.llm.api_key exists --check agent.condenser.llm.api_key exists  # bug: checks.0.actual eq null && checks.1.actual eq null
+  control-agent-server state cat base_state.json --conversation "$KF" --max-chars 200 --check agent.llm.api_key exists --check agent.condenser.llm.api_key exists  # bug: content.agent.llm.model exists && checks.0.actual eq null && checks.1.actual eq null
   ```
   Expected: both files hold the keys (encrypted with the server's cipher;
   `state cat` shows `<redacted:encrypted>`). Today the source's do and the

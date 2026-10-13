@@ -392,6 +392,26 @@ def dig(value: Any, path: str) -> Any:
     return current
 
 
+def has_path(value: Any, path: str) -> bool:
+    """Whether every step of a dotted path exists; a stored `null` counts.
+
+    `dig` answers `None` both for a missing key and for a `null` value, so a
+    `# bug:` predicate checks this first: an error object without `checks`
+    must not match `checks.0.actual eq null`.
+    """
+    current = value
+    for part in [p for p in path.split(".") if p]:
+        if isinstance(current, list) and part.lstrip("-").isdigit():
+            if not -len(current) <= int(part) < len(current):
+                return False
+            current = current[int(part)]
+        elif isinstance(current, dict) and part in current:
+            current = current[part]
+        else:
+            return False
+    return True
+
+
 def save_evidence(run: Run, target: str, payload: Any, suffix: str = ".json") -> Path:
     """Save under evidence/<feature>/<name>; never overwrite (name-2, name-3)."""
     if "/" not in target:
@@ -4111,6 +4131,9 @@ def parse_bug_predicate(text: str) -> list[list[str]]:
     by `&&`, matched like `--check` against the JSON object the last
     control-agent-server call on the marked line printed, for example
     `status eq 500 && response.body.exception contains 'has no attribute'`.
+    Every clause but a `missing` one also needs its path present in that
+    output (a stored `null` is present), and at least one clause must not be
+    `missing`, so an error object never reads as the bug.
     """
     if not text:
         raise ValueError(
@@ -4145,6 +4168,12 @@ def parse_bug_predicate(text: str) -> list[list[str]]:
                 f"`{' '.join(clause)}`: {clause[1]} takes "
                 + ("one value" if takes_value else "no value")
             )
+    if all(clause[1] == "missing" for clause in clauses):
+        raise ValueError(
+            "a `missing` clause needs a clause naming what the bug's output "
+            "does hold (`status eq 200 && result missing`), or an error object "
+            "would match"
+        )
     return clauses
 
 
@@ -4156,7 +4185,26 @@ def bug_predicate_matches(
         return exit_status == int(clauses[0][1])
     if not isinstance(observation, dict):
         return False
-    return all(evaluate_check(observation, clause)["ok"] for clause in clauses)
+    return all(
+        (clause[1] == "missing" or has_path(observation, clause[0]))
+        and evaluate_check(observation, clause)["ok"]
+        for clause in clauses
+    )
+
+
+def requires_closure(bullet: Bullet, bullets: Sequence[Bullet]) -> set[str]:
+    """Every feature `bullet` needs, directly or through its `Requires:`."""
+    by_id = {feature: other for other in bullets for feature in other.ids}
+    closure: set[str] = set()
+    stack = list(bullet.requires)
+    while stack:
+        feature = stack.pop()
+        if feature in closure:
+            continue
+        closure.add(feature)
+        if feature in by_id:
+            stack.extend(by_id[feature].requires)
+    return closure
 
 
 def driving_bullets(path: Path) -> list[Bullet]:
@@ -4293,19 +4341,11 @@ def undeclared_dependencies(bullets: list[Bullet]) -> list[str]:
     id or path can fail the `# bug` line for the wrong reason. Blocked and
     known-bug bullets never save their variables, so they are not producers.
     """
-    by_id = {feature: bullet for bullet in bullets for feature in bullet.ids}
     problems = []
     for index, bullet in enumerate(bullets):
         if bullet.label == "Preconditions" or not bullet.ids:
             continue
-        closure: set[str] = set()
-        stack = list(bullet.requires)
-        while stack:
-            feature = stack.pop()
-            if feature in closure or feature not in by_id:
-                continue
-            closure.add(feature)
-            stack.extend(by_id[feature].requires)
+        closure = requires_closure(bullet, bullets)
         missing: dict[str, list[str]] = {}
         for name in sorted(outside_reads(bullet.script)):
             for producer in reversed(bullets[:index]):
@@ -4612,7 +4652,8 @@ def cmd_map_run(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def replay_family(run: Run, path: Path, args: argparse.Namespace) -> dict[str, Any]:
-    bullets = select_bullets(driving_bullets(path), args.only)
+    every_bullet = driving_bullets(path)
+    bullets = select_bullets(every_bullet, args.only)
     checkout = Path(run.data.get("checkout", REPO_ROOT))
     state = run.dir / "map-run" / f"{path.stem}.state.sh"
     state.parent.mkdir(exist_ok=True)
@@ -4778,7 +4819,11 @@ def replay_family(run: Run, path: Path, args: argparse.Namespace) -> dict[str, A
                 documented = bug_predicate_matches(clauses, failed_status, observed)
             except ValueError as exc:
                 predicate_error = str(exc)
-        unarranged = sorted(broken.intersection(["Preconditions", *bullet.requires]))
+        unarranged = sorted(
+            broken.intersection(
+                ["Preconditions", *requires_closure(bullet, every_bullet)]
+            )
+        )
         if known_bug and code == 0 and not unarranged:
             status = "xpass"
             xpassed = True

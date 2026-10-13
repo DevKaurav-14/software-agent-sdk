@@ -200,8 +200,9 @@ Then exactly four H2 sections, in this order:
      failure at the marked command (a 401, 404 or 503 where the bug is a
      500), an arrange step that breaks first, a timeout, an early exit
      without a confirmed assertion location, or a pass after the family's
-     Preconditions or a `Requires:` recipe failed earlier in the run
-     (`--keep-going`), since its arrange never ran.
+     Preconditions or any recipe in its `Requires:` closure (the recipes it
+     requires, and theirs) failed earlier in the run (`--keep-going`), since
+     its arrange never ran.
    - The predicate is `PATH OP [VALUE]` clauses joined by `&&`, matched like
      `--check` against the JSON object the last `control-agent-server` call
      on the marked line printed:
@@ -213,6 +214,12 @@ Then exactly four H2 sections, in this order:
      a saved JSON file, a program's output) goes through
      `control-agent-server assert --value|--json|stdin --check ...`, so the
      predicate can name it: `# bug: value.status eq 200`.
+   - Every path in the predicate must be present in that output, except
+     under `missing`; a stored `null` counts as present. So
+     `checks.0.actual eq null` holds when the check ran and found nothing,
+     never on an error object that has no `checks`. A predicate made only of
+     `missing` clauses is rejected: anchor it on what the bug's output does
+     hold (`value.success eq true && value.id missing`).
    - `exit N` (the marked command's exit status) is the last resort, for a
      line whose symptom has no value to name, such as a TypeScript compile
      that fails with exit 2 on a type error. It says only that the line

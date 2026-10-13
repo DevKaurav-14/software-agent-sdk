@@ -815,6 +815,7 @@ def test_map_check_requires_a_bug_marker_in_known_bug_bullets(
         ("# bug: status is 500", "is not PATH OP"),
         ("# bug: status eq", "takes one value"),
         ("# bug: detail missing 500", "takes no value"),
+        ("# bug: detail missing", "needs a clause naming"),
         ("# bug: detail contains 'unclosed", "cannot parse"),
         ("# bug: status eq 500", "does not call control-agent-server"),
     ],
@@ -937,6 +938,57 @@ def test_known_bug_pass_after_a_broken_arrange_is_not_a_fix(
     bug = next(r for r in json.loads(out)["bullets"] if r.get("ids") == ["F98.bug"])
     assert bug["status"] == "fail", out
     assert "F98.second" in bug["hint"]
+
+
+def test_known_bug_pass_after_a_broken_indirect_arrange_is_not_a_fix(
+    run_dir, write_verification_family, capsys
+):
+    # F98.second passes on its own, but it needs F98.first, which failed; the
+    # known bug needs F98.second, so its pass is no evidence either.
+    family = (
+        FAMILY.replace("VALUE=$(echo carried)", "VALUE=$(echo carried)\n  false")
+        .replace(
+            '  test "$VALUE" = carried\n  control-agent-server api GET /info',
+            "  control-agent-server api GET /info",
+        )
+        .replace(
+            '  test "$VALUE" = carried\n  test "$VALUE" = fixed  # bug: exit 1',
+            "  true  # bug: exit 1",
+        )
+    )
+    write_verification_family(cas, family)
+    code, out = _run(capsys, "map", "run", "--file", "F98", "--keep-going")
+    rows = {tuple(r.get("ids") or []): r for r in json.loads(out)["bullets"]}
+    assert rows[("F98.second",)]["status"] == "pass", out
+    bug = rows[("F98.bug",)]
+    assert bug["status"] == "fail", out
+    assert "F98.first" in bug["hint"]
+
+
+@pytest.mark.parametrize(
+    "stored, status",
+    [
+        # The documented failure: the file is there and has no key.
+        ('{"agent": {"model": "m"}}', "xfail"),
+        # The file is missing: an error object has no `checks`, so the
+        # `eq null` clause must not read its absence as the bug.
+        (None, "fail"),
+    ],
+)
+def test_known_bug_predicate_needs_its_paths_present(
+    run_dir, write_verification_family, capsys, stored, status
+):
+    if stored is not None:
+        (run_dir / "state.json").write_text(stored)
+    family = FAMILY.replace(
+        '  test "$VALUE" = fixed  # bug: exit 1',
+        "  control-agent-server state cat state.json --check agent.key exists"
+        "  # bug: checks.0.actual eq null",
+    )
+    write_verification_family(cas, family)
+    code, out = _run(capsys, "map", "run", "--file", "F98")
+    bug = next(r for r in json.loads(out)["bullets"] if r.get("ids") == ["F98.bug"])
+    assert bug["status"] == status, out
 
 
 def test_known_bug_exit_predicate_tells_a_false_test_from_an_error(
