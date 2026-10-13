@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -254,13 +255,162 @@ def test_owners_routes_paths_and_flags_unowned_ones(demo_map, capsys):
     ]
 
 
-def test_rotation_covers_every_family_once_a_week():
+@pytest.mark.parametrize("start", [datetime(2026, 10, 10), datetime(2026, 12, 29)])
+def test_rotation_covers_every_family_once_a_week(start):
+    """Any seven consecutive days, New Year included, cover every family once."""
     families = [f"S{n:02d}" for n in range(1, 22)]
     seen = []
-    for day in range(10, 17):
-        _, today = sdk_map.rotation_slice(families, datetime(2026, 10, day))
+    for offset in range(7):
+        _, today = sdk_map.rotation_slice(families, start + timedelta(days=offset))
         seen += today
     assert sorted(seen) == families
+
+
+def test_statements_split_on_top_level_lines_only():
+    block = (
+        "uv run pytest tests/a.py -q\n"
+        'uv run python -c "\nimport os\nprint(1)\n"\n'
+        "LLM_MODEL=x uv run python examples/01_standalone_sdk/01_hello_world.py \\\n"
+        "  --flag\n"
+        "uv run pytest tests/integration/test_tool_presets.py -q"
+    )
+    statements = sdk_map.split_statements(block)
+    assert len(statements) == 4
+    assert [sdk_map.needs_model(st) for st in statements] == [False, False, True, False]
+    assert sdk_map.needs_model("uv run pytest tests/examples/test_examples.py")
+    assert sdk_map.needs_model("uv run python tests/integration/run_infer.py --x 1")
+
+
+def _bullet_map(demo_map, block, ids="`S98.ok`"):
+    (demo_map / "S98-demo.md").write_text(
+        FAMILY.replace(
+            "- **Works (`S98.ok`).**\n  ```sh\n  test 1 = 1\n  ```",
+            f"- **Works ({ids}).**\n  ```sh\n"
+            + "\n".join("  " + line for line in block.splitlines())
+            + "\n  ```",
+        )
+    )
+
+
+def test_mixed_blocks_run_their_deterministic_commands_without_a_key(
+    demo_map, tmp_path, capsys
+):
+    _bullet_map(
+        demo_map,
+        "test 1 = 1\nuv run python examples/01_standalone_sdk/01_hello_world.py",
+    )
+    code, out = _run(
+        capsys, "run", "--file", "S98", "--only", "S98.ok", "--out", str(tmp_path / "r")
+    )
+    (row,) = out["results"]
+    assert row["result"] == "pass"
+    assert row["proof"] == ["deterministic"]
+    assert "1 model-backed command(s) skipped" in row["note"]
+    transcript = Path(row["transcript"]).read_text()
+    assert "examples/01_standalone_sdk" not in transcript
+
+
+FAKE_RUN_INFER = """
+import json, os, sys
+args = sys.argv[1:]
+out = args[args.index("--output-dir") + 1]
+ids = args[args.index("--eval-ids") + 1].split(",")
+os.makedirs(os.path.join(out, "run"), exist_ok=True)
+outcome = os.environ.get("FAKE_OUTCOME", "fail")
+instances = [
+    {"instance_id": i, "test_result": {
+        "success": outcome == "pass", "skipped": outcome == "skip"}}
+    for i in ids[: 1 if outcome == "missing" else None]
+]
+with open(os.path.join(out, "run", "results.json"), "w") as f:
+    json.dump({"test_instances": instances}, f)
+print("Overall Success rate: 0.00% (0/1)")
+"""
+
+
+@pytest.mark.parametrize(
+    "outcome, result",
+    [("fail", "fail"), ("missing", "fail"), ("skip", "blocked"), ("pass", "pass")],
+)
+def test_integration_runs_are_judged_by_their_results_not_exit_code(
+    demo_map, tmp_path, monkeypatch, capsys, outcome, result
+):
+    repo = tmp_path / "repo"
+    (repo / "tests/integration").mkdir(parents=True)
+    (repo / "tests/integration/run_infer.py").write_text(FAKE_RUN_INFER)
+    monkeypatch.setattr(sdk_map, "REPO_ROOT", repo)
+    monkeypatch.setenv("FAKE_OUTCOME", outcome)
+    _bullet_map(
+        demo_map,
+        f"{sys.executable} tests/integration/run_infer.py --eval-ids t01_a,t02_b",
+    )
+    code, out = _run(
+        capsys,
+        "run",
+        "--file",
+        "S98",
+        "--only",
+        "S98.ok",
+        "--with-llm",
+        "--out",
+        str(tmp_path / "r"),
+    )
+    (row,) = out["results"]
+    assert row["result"] == result, row["note"]
+    if result == "pass":
+        assert row["proof"] == ["integration"]
+
+
+def test_timeouts_kill_everything_the_recipe_started(demo_map, tmp_path, capsys):
+    pidfile = tmp_path / "child.pid"
+    _bullet_map(demo_map, f"sleep 60 &\necho $! > {pidfile}\nsleep 60")
+    code, out = _run(
+        capsys,
+        "run",
+        "--file",
+        "S98",
+        "--only",
+        "S98.ok",
+        "--timeout",
+        "1",
+        "--out",
+        str(tmp_path / "r"),
+    )
+    (row,) = out["results"]
+    assert row["result"] == "fail"
+    assert "(timeout)" in row["note"]
+    pid = int(pidfile.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+def test_reports_take_the_newest_attempt_whatever_the_argument_order(
+    demo_map, tmp_path, capsys
+):
+    def ledger(name, result, at):
+        path = tmp_path / name
+        path.mkdir()
+        row = {"feature": "S98.ok", "result": result, "at": at}
+        (path / "ledger.jsonl").write_text(json.dumps(row) + "\n")
+        return str(path)
+
+    baseline = ledger("baseline", "pass", "2026-10-12T00:00:00+00:00")
+    early = ledger("early-pass", "pass", "2026-10-13T01:00:00+00:00")
+    late = ledger("late-fail", "fail", "2026-10-13T02:00:00+00:00")
+    for runs in ([late, early], [early, late]):
+        code, out = _run(
+            capsys,
+            "report",
+            "--runs",
+            *runs,
+            "--baseline",
+            baseline,
+            "--print-markdown",
+        )
+        assert out["counts"] == {"fail": 1}
+        assert [c["feature"] for c in out["changes"]["newly_failing"]] == ["S98.ok"]
+        assert out["conflicting"][0]["feature"] == "S98.ok"
+        assert "## Conflicting attempts" in out["markdown"]
 
 
 def test_every_command_documents_examples(capsys):

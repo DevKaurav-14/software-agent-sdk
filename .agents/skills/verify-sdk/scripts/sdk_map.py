@@ -19,6 +19,8 @@ import glob
 import json
 import os
 import re
+import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -50,8 +52,13 @@ UNTESTED_RE = re.compile(r"\*\*(?:none \()?untested\)?\*\*")
 # Placeholders such as `vN/` or `v1..v8/` name a pattern, not a path.
 PLACEHOLDER_RE = re.compile(r"/vN/|\.\.|<")
 PRODUCT_PATH_RE = re.compile(r"^openhands-(sdk|tools|workspace)/")
-# Blocks that need a model key (examples, the integration and example runners).
-MODEL_BLOCK_RE = re.compile(r"\bexamples/|tests/integration/|tests/examples/")
+# Commands that need a model key: example scripts, the examples test runner
+# and the integration runner. Deterministic pytest under tests/integration/
+# (test_tool_presets.py and friends) is not one of them.
+MODEL_COMMAND_RE = re.compile(
+    r"(?:^|[\s'\"=])(?:tests/)?examples/|tests/integration/run_infer\.py"
+)
+INTEGRATION_RE = re.compile(r"tests/integration/run_infer\.py")
 BASELINE_LINE_RE = re.compile(
     r"^Maintenance baseline: main@([0-9a-f]{7,40}) \((\d{4}-\d{2}-\d{2})\)(.*)$",
     re.M,
@@ -437,7 +444,8 @@ def rotation_slice(
 ) -> tuple[int, list[str]]:
     """Today's slice of the families: every family once in seven days."""
     per_day = per_day or -(-len(families) // 7)
-    slot = day.timetuple().tm_yday % 7
+    # A continuous day count, so the cycle does not restart on January 1.
+    slot = day.toordinal() % 7
     return slot, list(families[slot * per_day : slot * per_day + per_day])
 
 
@@ -480,6 +488,181 @@ def append_row(out: Path, row: dict[str, Any]) -> None:
         f.write(json.dumps(row) + "\n")
 
 
+def split_statements(block: str) -> list[str]:
+    """Top-level shell statements: lines joined while a quote is open or a
+    line continues (trailing backslash, `&&`, `||` or `|`)."""
+    statements, current = [], ""
+    for line in block.splitlines():
+        current = f"{current}\n{line}" if current else line
+        if not current.strip():
+            current = ""
+            continue
+        if re.search(r"(\\|&&|\|\||\|)\s*$", current):
+            continue
+        try:
+            shlex.split(current, comments=True)
+        except ValueError:  # an open quote: the statement goes on
+            continue
+        statements.append(current)
+        current = ""
+    if current.strip():
+        statements.append(current)
+    return statements
+
+
+def needs_model(statement: str) -> bool:
+    return bool(MODEL_COMMAND_RE.search(statement))
+
+
+def proof_kind(statement: str) -> str:
+    """deterministic (no model), example, or integration (the runner)."""
+    if INTEGRATION_RE.search(statement):
+        return "integration"
+    return "example" if needs_model(statement) else "deterministic"
+
+
+def kill_group(pgid: int) -> None:
+    """End every process a recipe started, whatever it backgrounded."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except (ProcessLookupError, PermissionError):
+            return
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(pgid, 0)
+            except (ProcessLookupError, PermissionError):
+                return
+            time.sleep(0.1)
+
+
+def run_script(script: str, log: Any, timeout: float) -> int:
+    """Run a script in its own process group; nothing it starts outlives it."""
+    proc = subprocess.Popen(
+        ["bash", "-eo", "pipefail", "-c", script],
+        cwd=REPO_ROOT,
+        stdin=subprocess.DEVNULL,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    try:
+        code = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        code = 124
+    except BaseException:
+        kill_group(proc.pid)
+        proc.wait()
+        raise
+    kill_group(proc.pid)
+    proc.wait()
+    return code
+
+
+def with_output_dir(statement: str, out_dir: Path) -> str:
+    """Point an integration run at a fresh directory we read back."""
+    if "--output-dir" in statement:
+        return statement
+    return f"{statement.rstrip()} --output-dir {shlex.quote(str(out_dir))}"
+
+
+def integration_verdict(statement: str, out_dir: Path) -> tuple[str, str]:
+    """run_infer.py exits 0 even when its tests fail: read its results.json."""
+    files = sorted(out_dir.rglob("results.json"), key=lambda p: p.stat().st_mtime)
+    if not files:
+        return "fail", f"integration run wrote no results.json under {out_dir}"
+    data = json.loads(files[-1].read_text())
+    results = {
+        i["instance_id"]: i["test_result"] for i in data.get("test_instances", [])
+    }
+    match = re.search(r"--eval-ids[ =]([\w,-]+)", statement)
+    wanted = match.group(1).split(",") if match else list(results)
+    if not wanted:
+        return "fail", "integration run reported no tests"
+    missing = [t for t in wanted if t not in results]
+    failed = [
+        t
+        for t in wanted
+        if t in results
+        and not results[t].get("success")
+        and not results[t].get("skipped")
+    ]
+    skipped = [t for t in wanted if t in results and results[t].get("skipped")]
+    where = f"({files[-1]})"
+    if missing or failed:
+        return "fail", f"integration tests missing {missing} failed {failed} {where}"
+    if skipped:
+        return "blocked", f"integration tests skipped {skipped} {where}"
+    return "pass", f"integration tests passed {wanted}"
+
+
+def run_bullet(
+    bullet: dict[str, Any], log: Any, work: Path, with_llm: bool, timeout: float
+) -> dict[str, Any]:
+    """Run a bullet's blocks: deterministic statements always, model-backed
+    ones only with a key, and integration runs judged by their results."""
+    result = {"outcome": "pass", "notes": [], "proof": set(), "skipped_model": 0}
+
+    severity = {"pass": 0, "blocked": 1, "fail": 2}
+
+    def worse(outcome: str, note: str) -> None:
+        if severity[outcome] > severity[result["outcome"]]:
+            result["outcome"] = outcome
+        result["notes"].append(note)
+
+    ran = 0
+    for b, block in enumerate(bullet["blocks"], 1):
+        kept, checks = [], []
+        for k, statement in enumerate(split_statements(block), 1):
+            if needs_model(statement) and not with_llm:
+                result["skipped_model"] += 1
+                continue
+            if INTEGRATION_RE.search(statement):
+                out_dir = work / f"block{b}-{k}"
+                statement = with_output_dir(statement, out_dir)
+                checks.append((statement, out_dir))
+            kept.append(statement)
+        if not kept:
+            continue
+        ran += 1
+        script = "\n".join(kept)
+        log.write(f"$ {script}\n")
+        log.flush()
+        start_offset = log.tell()
+        started = time.monotonic()
+        code = run_script(script, log, timeout)
+        log.write(f"\n[exit {code} after {time.monotonic() - started:.0f}s]\n")
+        log.flush()
+        if code != 0:
+            worse(
+                "fail",
+                f"block {b} exited {code}" + (" (timeout)" if code == 124 else ""),
+            )
+            break
+        result["proof"].update(proof_kind(st) for st in kept)
+        if any(proof_kind(st) == "example" for st in kept):
+            output = Path(log.name).read_text(errors="replace")[start_offset:]
+            if re.search(r"^EXAMPLE_COST: 0(?:\.0+)?\s*$", output, re.M):
+                result["notes"].append(
+                    f"block {b}: an example reported EXAMPLE_COST: 0"
+                    " (no paid model calls)"
+                )
+        for statement, out_dir in checks:
+            outcome, note = integration_verdict(statement, out_dir)
+            log.write(f"[{note}]\n")
+            if outcome != "pass":
+                worse(outcome, note)
+    if result["skipped_model"]:
+        skipped = result["skipped_model"]
+        result["notes"].append(
+            f"{skipped} model-backed command(s) skipped (no LLM_API_KEY)"
+        )
+    if ran == 0 and result["outcome"] == "pass":
+        result["outcome"] = "blocked"
+    return result
+
+
 def cmd_run(args: argparse.Namespace) -> dict[str, Any]:
     if not args.file and not args.all:
         usage_error("name a family with --file, or pass --all", f"{CLI} run --file S05")
@@ -498,7 +681,7 @@ def cmd_run(args: argparse.Namespace) -> dict[str, Any]:
             ids = [i for i in bullet["ids"] if not only or i in only]
             if not ids:
                 continue
-            outcome, note, transcript = "pass", "", None
+            outcome, note, transcript, proof = "pass", "", None, []
             if bullet["blocked"]:
                 outcome, note = "blocked", "bullet is labeled blocked"
             elif not bullet["blocks"]:
@@ -508,42 +691,17 @@ def cmd_run(args: argparse.Namespace) -> dict[str, Any]:
             else:
                 assert out is not None
                 transcript = out / "transcripts" / f"{path.stem}-{n:02d}.log"
-                ran = 0
+                work = out / "work" / f"{path.stem}-{n:02d}"
                 with transcript.open("w") as log:
-                    for block in bullet["blocks"]:
-                        if MODEL_BLOCK_RE.search(block) and not with_llm:
-                            note = "model-backed blocks skipped (no LLM_API_KEY)"
-                            continue
-                        ran += 1
-                        log.write(f"$ {block}\n")
-                        log.flush()
-                        started = time.monotonic()
-                        try:
-                            proc = subprocess.run(
-                                ["bash", "-eo", "pipefail", "-c", block],
-                                cwd=REPO_ROOT,
-                                stdin=subprocess.DEVNULL,
-                                stdout=log,
-                                stderr=subprocess.STDOUT,
-                                timeout=args.timeout,
-                            )
-                            code = proc.returncode
-                        except subprocess.TimeoutExpired:
-                            code = 124
-                        log.write(
-                            f"\n[exit {code} after {time.monotonic() - started:.0f}s]\n"
-                        )
-                        if code != 0:
-                            outcome, note = "fail", f"block exited {code}"
-                            break
-                if ran == 0 and outcome == "pass":
-                    outcome = "blocked"
-                    note = note or "nothing to run"
+                    ran = run_bullet(bullet, log, work, with_llm, args.timeout)
+                outcome, note = ran["outcome"], "; ".join(ran["notes"])
+                proof = sorted(ran["proof"])
             entry = {
                 "family": path.name,
                 "bullet": n,
                 "ids": ids,
                 "result": outcome,
+                "proof": proof,
                 "note": note,
                 "transcript": str(transcript) if transcript else None,
             }
@@ -555,7 +713,8 @@ def cmd_run(args: argparse.Namespace) -> dict[str, Any]:
     if out is not None:
         # One row per sub-feature: a feature several bullets prove fails if
         # any of them failed, passes if one passed, and is blocked only when
-        # nothing that ran could prove it.
+        # nothing that ran could prove it. `proof` says which kinds of proof
+        # passed (deterministic tests, examples, integration runs).
         for feature, entries in per_feature.items():
             worst = min(entries, key=lambda e: RESULT_PRECEDENCE[e["result"]])
             append_row(
@@ -563,6 +722,14 @@ def cmd_run(args: argparse.Namespace) -> dict[str, Any]:
                 {
                     "feature": feature,
                     "result": worst["result"],
+                    "proof": sorted(
+                        {
+                            k
+                            for e in entries
+                            if e["result"] == "pass"
+                            for k in e["proof"]
+                        }
+                    ),
                     "entry": " | ".join(e["label"] for e in entries),
                     "note": "; ".join(
                         f"bullet {e['bullet']}: {e['result']}"
@@ -595,16 +762,43 @@ def read_ledger(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
+def latest_by_time(rows: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """The newest row per feature by its recorded time, whatever order the
+    ledgers were given in (ties keep the later argument)."""
+    ordered = sorted(rows, key=lambda row: row.get("at") or "")
+    return {row["feature"]: row for row in ordered}
+
+
+def conflicting_attempts(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Features whose attempts in this set disagree, oldest first."""
+    seen: dict[str, list[dict[str, Any]]] = {}
+    for row in sorted(rows, key=lambda row: row.get("at") or ""):
+        seen.setdefault(row["feature"], []).append(row)
+    return [
+        {
+            "feature": feature,
+            "attempts": [
+                {"at": a.get("at"), "result": a["result"], "run": a.get("run_dir")}
+                for a in attempts
+            ],
+        }
+        for feature, attempts in sorted(seen.items())
+        if len({a["result"] for a in attempts}) > 1
+    ]
+
+
 def compare_ledgers(
     before_rows: Iterable[dict[str, Any]], after_rows: Iterable[dict[str, Any]]
 ) -> dict[str, list[dict[str, Any]]]:
-    before = {row["feature"]: row for row in before_rows}
-    after = {row["feature"]: row for row in after_rows}
+    after_rows = list(after_rows)
+    before = latest_by_time(before_rows)
+    after = latest_by_time(after_rows)
     changes: dict[str, list[dict[str, Any]]] = {
         "newly_failing": [],
         "newly_passing": [],
         "other": [],
         "not_checked": [],
+        "conflicting": conflicting_attempts(after_rows),
     }
     for feature in sorted(set(before) | set(after)):
         old = before.get(feature, {}).get("result")
@@ -624,8 +818,9 @@ def compare_ledgers(
 
 
 def cmd_report(args: argparse.Namespace) -> dict[str, Any]:
-    rows = [row for r in args.runs for row in read_ledger(Path(r))]
-    latest = {row["feature"]: row for row in rows}
+    rows = [row | {"run_dir": r} for r in args.runs for row in read_ledger(Path(r))]
+    latest = latest_by_time(rows)
+    conflicting = conflicting_attempts(rows)
     order = {"fail": 0, "blocked": 1, "not-run": 2, "pass": 3}
     ordered = sorted(latest.values(), key=lambda r: (order[r["result"]], r["feature"]))
     counts: dict[str, int] = {}
@@ -648,8 +843,15 @@ def cmd_report(args: argparse.Namespace) -> dict[str, Any]:
                     old, new = c["before"] or "absent", c["after"] or "absent"
                     lines.append(f"- {c['feature']}: {old} -> {new}")
                 lines.append("")
-        if not any(changes.values()):
+        if not any(v for k, v in changes.items() if k != "conflicting"):
             lines += ["No result changed against the baseline.", ""]
+    if conflicting:
+        lines += ["## Conflicting attempts", ""]
+        for c in conflicting:
+            steps = ", ".join(f"{a['result']} at {a['at']}" for a in c["attempts"])
+            lines.append(f"- {c['feature']}: {steps}")
+        lines.append("")
+    if lines:
         lines += ["## Checks", ""]
     lines += [
         "| Feature | Result | Revision | Note | Transcript |",
@@ -674,6 +876,7 @@ def cmd_report(args: argparse.Namespace) -> dict[str, Any]:
         "features_with_evidence": len(latest),
         "map_ids_without_evidence": len(missing),
         "changes": changes,
+        "conflicting": conflicting,
         "markdown": markdown if args.print_markdown else None,
         "out": args.out,
     }
@@ -768,7 +971,7 @@ def build_parser() -> argparse.ArgumentParser:
   {CLI} rotation
   {CLI} rotation --date 2026-10-12
 
-The slice comes from the UTC day of the year modulo 7, over the index table
+The slice comes from the UTC date's day count modulo 7, over the index table
 in ID order, so every family gets a full pass once a week.""",
     )
     p.set_defaults(func=cmd_rotation)
@@ -786,10 +989,18 @@ in ID order, so every family gets a full pass once a week.""",
   {CLI} run --file S01 --dry-run
 
 Each bullet's ```sh blocks run in Bash with `set -eo pipefail` from the
-repository root, stdin closed. A bullet passes when every block it ran exits
-0. Blocks that call examples/ or tests/integration/ need a model: they run
-when LLM_API_KEY is set (or --with-llm), and are skipped otherwise, so a
-bullet with only such blocks is `blocked`. A bullet whose label says
+repository root, stdin closed, each block in its own process group that is
+killed when the block ends or times out. A bullet passes when every block it
+ran exits 0. Commands that run examples/ scripts, tests/examples/ or the
+integration runner (tests/integration/run_infer.py) need a model: they run
+when LLM_API_KEY is set (or --with-llm) and are skipped otherwise, while the
+deterministic commands in the same block still run; a bullet with nothing
+left to run is `blocked`. Integration runs get a fresh --output-dir and pass
+only when every requested test is present and successful in its
+results.json (the runner exits 0 on failed tests). Each ledger row's `proof`
+says which kinds passed: deterministic, example, integration. An example that
+prints `EXAMPLE_COST: 0` gets a note, since some examples run partly without
+a model. A bullet whose label says
 "blocked" is reported and not executed. Rows go to <out>/ledger.jsonl and
 transcripts to <out>/transcripts/; <out> defaults to a new directory under
 ${HOME_ENV} (or $TMPDIR/sdk-verify).""",

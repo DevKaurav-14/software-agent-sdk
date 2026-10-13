@@ -874,11 +874,15 @@ def test_map_baseline_rejects_missing_duplicate_or_malformed_lines(
     )
 
 
-def test_rotation_covers_every_family_once_a_week():
+@pytest.mark.parametrize("start", [(2026, 10, 10), (2026, 12, 29), (2028, 2, 26)])
+def test_rotation_covers_every_family_once_a_week(start):
+    """Any seven consecutive days, New Year and leap days included."""
     families = [f"F{n:02d}" for n in range(1, 35)]
+    first = cas.datetime(*start)
     seen = []
-    for day in range(10, 17):
-        _, today = cas.rotation_slice(families, cas.datetime(2026, 10, day))
+    for offset in range(7):
+        day = cas.datetime.fromordinal(first.toordinal() + offset)
+        _, today = cas.rotation_slice(families, day)
         assert 0 < len(today) <= 5
         seen += today
     assert sorted(seen) == families
@@ -889,7 +893,9 @@ def test_rotation_reads_the_index(tmp_path, monkeypatch, capsys):
     _index(tmp_path, ["Maintenance baseline: main@abc1234 (2026-10-01)."])
     code, out = _run(capsys, "map", "rotation", "--date", "2026-10-12")
     assert code == 0, out
-    assert json.loads(out)["families"] == ["F26", "F27", "F28", "F29", "F30"]
+    slot = cas.datetime(2026, 10, 12).toordinal() % 7
+    expected = [f"F{n:02d}" for n in range(slot * 5 + 1, min(slot * 5 + 6, 35))]
+    assert json.loads(out)["families"] == expected
 
 
 def test_compare_ledgers_sorts_what_changed():
@@ -906,6 +912,22 @@ def test_compare_ledgers_sorts_what_changed():
     assert [c["feature"] for c in changes["not_checked"]] == ["F01.c"]
     assert [c["feature"] for c in changes["other"]] == ["F01.f"]
     assert "Newly failing:" in "\n".join(cas.changes_markdown(changes))
+
+
+def test_compare_ledgers_takes_the_newest_attempt_whatever_the_order():
+    def row(result, at):
+        return {"feature": "F01.a", "result": result, "run": at, "at": at}
+
+    baseline = [row("pass", "2026-10-12T00:00:00+00:00")]
+    early = row("pass", "2026-10-13T01:00:00+00:00")
+    late = row("fail", "2026-10-13T02:00:00+00:00")
+    for current in ([late, early], [early, late]):
+        changes = cas.compare_ledgers(baseline, current)
+        assert [c["feature"] for c in changes["newly_failing"]] == ["F01.a"]
+        assert changes["conflicting"][0]["feature"] == "F01.a"
+        text = "\n".join(cas.changes_markdown(changes))
+        assert "No result changed" not in text
+        assert "Conflicting attempts" in text
 
 
 def test_every_command_documents_examples(capsys):

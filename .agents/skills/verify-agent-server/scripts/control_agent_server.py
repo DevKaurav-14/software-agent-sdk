@@ -3383,14 +3383,34 @@ FAILING = {"fail", "xpass"}
 def compare_ledgers(
     before_rows: Iterable[dict[str, Any]], after_rows: Iterable[dict[str, Any]]
 ) -> dict[str, list[dict[str, Any]]]:
-    """Latest result per sub-feature in each ledger, and what moved between them."""
-    before = {row["feature"]: row for row in before_rows}
+    """Latest result per sub-feature in each ledger, and what moved between them.
+
+    "Latest" is by each row's recorded time, never by the order the runs were
+    given in, so an older pass cannot hide a newer failure; attempts in the
+    current runs that disagree are listed under "conflicting".
+    """
+
+    def by_time(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+        return sorted(rows, key=lambda row: row.get("at") or "")
+
+    after_rows = by_time(after_rows)
+    before = {row["feature"]: row for row in by_time(before_rows)}
     after = {row["feature"]: row for row in after_rows}
+    attempts: dict[str, list[dict[str, Any]]] = {}
+    for row in after_rows:
+        attempts.setdefault(row["feature"], []).append(
+            {"at": row.get("at"), "run": row.get("run"), "result": row["result"]}
+        )
     changes: dict[str, list[dict[str, Any]]] = {
         "newly_failing": [],
         "newly_passing": [],
         "other": [],
         "not_checked": [],
+        "conflicting": [
+            {"feature": feature, "attempts": tries}
+            for feature, tries in sorted(attempts.items())
+            if len({t["result"] for t in tries}) > 1
+        ],
     }
     for feature in sorted(set(before) | set(after)):
         old = before.get(feature, {}).get("result")
@@ -3425,8 +3445,14 @@ def changes_markdown(changes: dict[str, list[dict[str, Any]]]) -> list[str]:
                 for c in changes[key]
             ]
             lines.append("")
-    if not any(changes.values()):
+    if not any(changes[key] for key in titles):
         lines += ["No result changed against the baseline.", ""]
+    if changes["conflicting"]:
+        lines += ["Conflicting attempts in these runs:", ""]
+        for c in changes["conflicting"]:
+            steps = ", ".join(f"{t['result']} at {t['at']}" for t in c["attempts"])
+            lines.append(f"- {c['feature']}: {steps}")
+        lines.append("")
     return lines
 
 
@@ -4947,7 +4973,8 @@ def rotation_slice(
 ) -> tuple[int, list[str]]:
     """Today's slice of the families: every family once in seven days."""
     per_day = per_day or -(-len(families) // 7)
-    slot = day.timetuple().tm_yday % 7
+    # A continuous day count, so the cycle does not restart on January 1.
+    slot = day.toordinal() % 7
     return slot, list(families[slot * per_day : slot * per_day + per_day])
 
 
@@ -6176,7 +6203,7 @@ reported and not executed. Transcripts are saved under <run>/evidence/map-run/."
   {CLI} map rotation --date 2026-10-12
   for f in $({CLI} map rotation | jq -r ".families[]"); do {CLI} map run --file "$f" --fresh --record; done
 
-The slice comes from the UTC day of the year modulo 7, over the index table
+The slice comes from the UTC date's day count modulo 7, over the index table
 in ID order, so every family gets a full live pass once a week and no state
 carries between runs.""",
     )

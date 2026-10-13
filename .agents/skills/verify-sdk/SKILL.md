@@ -57,8 +57,13 @@ sdk-map run --file S05 --only S05.event-base            # the bullets that name 
 sdk-map run --all --out "$SDK_VERIFY_HOME/full"         # the whole map
 ```
 
-A bullet passes when every block it ran exits 0; blocks that call
-`examples/` or `tests/integration/` run only with a model key.
+A bullet passes when every block it ran exits 0. Commands that run an
+example script, `tests/examples/` or the integration runner
+(`tests/integration/run_infer.py`) run only with a model key; the
+deterministic commands in the same block run either way. An integration run
+passes only when its `results.json` shows every requested test succeeded,
+because the runner exits 0 on failed tests. Each block runs in its own
+process group, which is killed when the block ends or times out.
 
 ## Evidence
 
